@@ -100,7 +100,7 @@ app.get("/", (req, res) => {
   });
 });
 
-app.post("/create-tables", async (req, res) => {
+app.get("/create-tables", async (req, res) => {
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
