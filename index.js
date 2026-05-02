@@ -1,5 +1,8 @@
 require("dotenv").config();
 
+const http = require("http");
+const { Server } = require("socket.io");
+
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
@@ -470,6 +473,7 @@ app.post("/orders", auth(["admin", "mesero"]), async (req, res) => {
     );
 
     await client.query("COMMIT");
+io.emit("new_order", finalOrder.rows[0]);
 
     res.json(finalOrder.rows[0]);
   } catch (error) {
@@ -528,7 +532,7 @@ app.put("/orders/:id/complete", auth(["admin", "barista"]), async (req, res) => 
        RETURNING *`,
       [id]
     );
-
+io.emit("order_completed", result.rows[0]);
     res.json(result.rows[0]);
   } catch (error) {
     console.error(error);
@@ -588,6 +592,18 @@ app.get("/orders/history", auth(["admin"]), async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+const server = http.createServer(app);
+
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+  },
+});
+
+io.on("connection", (socket) => {
+  console.log("Cliente conectado");
+});
+
+server.listen(PORT, () => {
   console.log(`API Cafetería corriendo en puerto ${PORT}`);
 });
