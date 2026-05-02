@@ -6,19 +6,67 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const path = require("path");
+const crypto = require("crypto");
+const {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+} = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+
 const pool = require("./db");
 
 const app = express();
 
-app.use(cors({
-  origin: "*",
-}));
-
+app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "cafeteria_secret";
-const FILES_BASE_URL = process.env.FILES_BASE_URL || "http://localhost:3000";
+const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME;
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024,
+  },
+});
+
+const s3 = new S3Client({
+  region: "auto",
+  endpoint: process.env.R2_ENDPOINT,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+  },
+});
+
+async function uploadToR2(file) {
+  const ext = path.extname(file.originalname || "").toLowerCase() || ".jpg";
+  const key = `products/product_${Date.now()}_${crypto.randomUUID()}${ext}`;
+
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: R2_BUCKET_NAME,
+      Key: key,
+      Body: file.buffer,
+      ContentType: file.mimetype,
+    })
+  );
+
+  return key;
+}
+
+async function getSignedImageUrl(key) {
+  if (!key) return null;
+
+  const command = new GetObjectCommand({
+    Bucket: R2_BUCKET_NAME,
+    Key: key,
+  });
+
+  return getSignedUrl(s3, command, { expiresIn: 60 * 10 });
+}
 
 function auth(requiredRoles = []) {
   return (req, res, next) => {
@@ -45,23 +93,11 @@ function auth(requiredRoles = []) {
   };
 }
 
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, "uploads/");
-  },
-  filename: function (req, file, cb) {
-    const ext = path.extname(file.originalname);
-    const name = `product_${Date.now()}${ext}`;
-    cb(null, name);
-  },
-});
-
-const upload = multer({ storage });
-
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-
 app.get("/", (req, res) => {
-  res.json({ ok: true, message: "API Cafetería BP Group funcionando" });
+  res.json({
+    ok: true,
+    message: "API Cafetería BP Group funcionando con R2 privado",
+  });
 });
 
 app.post("/create-tables", async (req, res) => {
@@ -82,7 +118,7 @@ app.post("/create-tables", async (req, res) => {
         description TEXT,
         price NUMERIC(10,2) NOT NULL DEFAULT 0,
         category TEXT,
-        image_url TEXT,
+        image_key TEXT,
         active BOOLEAN DEFAULT TRUE,
         created_at TIMESTAMP DEFAULT NOW()
       );
@@ -138,6 +174,11 @@ app.post("/create-admin", async (req, res) => {
     res.json(result.rows[0]);
   } catch (error) {
     console.error(error);
+
+    if (error.code === "23505") {
+      return res.status(400).json({ error: "Ese usuario ya existe" });
+    }
+
     res.status(500).json({ error: "Error creando admin" });
   }
 });
@@ -192,6 +233,10 @@ app.post("/users", auth(["admin"]), async (req, res) => {
   try {
     const { name, username, password, role } = req.body;
 
+    if (!["admin", "mesero", "barista"].includes(role)) {
+      return res.status(400).json({ error: "Rol inválido" });
+    }
+
     const hash = await bcrypt.hash(password, 10);
 
     const result = await pool.query(
@@ -204,6 +249,11 @@ app.post("/users", auth(["admin"]), async (req, res) => {
     res.json(result.rows[0]);
   } catch (error) {
     console.error(error);
+
+    if (error.code === "23505") {
+      return res.status(400).json({ error: "Ese usuario ya existe" });
+    }
+
     res.status(500).json({ error: "Error creando usuario" });
   }
 });
@@ -230,7 +280,14 @@ app.get("/products", auth(["admin", "mesero", "barista"]), async (req, res) => {
       ORDER BY p.category, p.name
     `);
 
-    res.json(result.rows);
+    const products = await Promise.all(
+      result.rows.map(async (product) => ({
+        ...product,
+        image_url: await getSignedImageUrl(product.image_key),
+      }))
+    );
+
+    res.json(products);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error obteniendo productos" });
@@ -241,20 +298,25 @@ app.post("/products", auth(["admin"]), upload.single("image"), async (req, res) 
   try {
     const { name, description, price, category } = req.body;
 
-    let imageUrl = null;
+    let imageKey = null;
 
     if (req.file) {
-      imageUrl = `${FILES_BASE_URL}/uploads/${req.file.filename}`;
+      imageKey = await uploadToR2(req.file);
     }
 
     const result = await pool.query(
-      `INSERT INTO products (name, description, price, category, image_url)
+      `INSERT INTO products (name, description, price, category, image_key)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [name, description, price, category, imageUrl]
+      [name, description, price, category, imageKey]
     );
 
-    res.json(result.rows[0]);
+    const product = result.rows[0];
+
+    res.json({
+      ...product,
+      image_url: await getSignedImageUrl(product.image_key),
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error creando producto" });
@@ -266,10 +328,10 @@ app.put("/products/:id", auth(["admin"]), upload.single("image"), async (req, re
     const { id } = req.params;
     const { name, description, price, category, active } = req.body;
 
-    let imageUrl = req.body.image_url || null;
+    let imageKey = req.body.image_key || null;
 
     if (req.file) {
-      imageUrl = `${FILES_BASE_URL}/uploads/${req.file.filename}`;
+      imageKey = await uploadToR2(req.file);
     }
 
     const result = await pool.query(
@@ -279,13 +341,22 @@ app.put("/products/:id", auth(["admin"]), upload.single("image"), async (req, re
            price = $3,
            category = $4,
            active = $5,
-           image_url = COALESCE($6, image_url)
+           image_key = COALESCE($6, image_key)
        WHERE id = $7
        RETURNING *`,
-      [name, description, price, category, active ?? true, imageUrl, id]
+      [name, description, price, category, active ?? true, imageKey, id]
     );
 
-    res.json(result.rows[0]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Producto no encontrado" });
+    }
+
+    const product = result.rows[0];
+
+    res.json({
+      ...product,
+      image_url: await getSignedImageUrl(product.image_key),
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error actualizando producto" });
@@ -296,10 +367,7 @@ app.delete("/products/:id", auth(["admin"]), async (req, res) => {
   try {
     const { id } = req.params;
 
-    await pool.query(
-      "UPDATE products SET active = FALSE WHERE id = $1",
-      [id]
-    );
+    await pool.query("UPDATE products SET active = FALSE WHERE id = $1", [id]);
 
     res.json({ ok: true, message: "Producto desactivado" });
   } catch (error) {
@@ -324,6 +392,19 @@ app.post("/products/:id/options", auth(["admin"]), async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error creando opción" });
+  }
+});
+
+app.delete("/product-options/:id", auth(["admin"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    await pool.query("DELETE FROM product_options WHERE id = $1", [id]);
+
+    res.json({ ok: true, message: "Opción eliminada" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error eliminando opción" });
   }
 });
 
@@ -352,7 +433,7 @@ app.post("/orders", auth(["admin", "mesero"]), async (req, res) => {
 
     for (const item of items) {
       const productResult = await client.query(
-        "SELECT * FROM products WHERE id = $1",
+        "SELECT * FROM products WHERE id = $1 AND active = TRUE",
         [item.product_id]
       );
 
@@ -452,6 +533,25 @@ app.put("/orders/:id/complete", auth(["admin", "barista"]), async (req, res) => 
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error completando orden" });
+  }
+});
+
+app.put("/orders/:id/cancel", auth(["admin"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `UPDATE orders
+       SET status = 'cancelado'
+       WHERE id = $1
+       RETURNING *`,
+      [id]
+    );
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error cancelando orden" });
   }
 });
 
