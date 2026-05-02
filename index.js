@@ -485,7 +485,7 @@ io.emit("new_order", finalOrder.rows[0]);
   }
 });
 
-app.get("/orders/pending", auth(["admin", "barista"]), async (req, res) => {
+app.get("/orders/pending", auth(["admin", "barista", "mesero"]), async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT 
@@ -517,6 +517,91 @@ app.get("/orders/pending", auth(["admin", "barista"]), async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error obteniendo órdenes" });
+  }
+});
+
+app.put("/orders/:id", auth(["admin", "mesero"]), async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const { id } = req.params;
+    const { items } = req.body;
+
+    if (!items || items.length === 0) {
+      return res.status(400).json({ error: "La orden no tiene productos" });
+    }
+
+    await client.query("BEGIN");
+
+    const orderResult = await client.query(
+      `SELECT * FROM orders 
+       WHERE id = $1 AND status = 'pendiente'`,
+      [id]
+    );
+
+    if (orderResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        error: "Orden no encontrada o ya fue completada",
+      });
+    }
+
+    await client.query("DELETE FROM order_items WHERE order_id = $1", [id]);
+
+    let total = 0;
+
+    for (const item of items) {
+      const productResult = await client.query(
+        "SELECT * FROM products WHERE id = $1 AND active = TRUE",
+        [item.product_id]
+      );
+
+      if (productResult.rows.length === 0) {
+        throw new Error("Producto no encontrado");
+      }
+
+      const product = productResult.rows[0];
+      const quantity = Number(item.quantity || 1);
+      const unitPrice = Number(product.price);
+      const lineTotal = quantity * unitPrice;
+
+      total += lineTotal;
+
+      await client.query(
+        `INSERT INTO order_items 
+         (order_id, product_id, product_name, quantity, unit_price, notes, options_json)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          id,
+          product.id,
+          product.name,
+          quantity,
+          unitPrice,
+          item.notes || "",
+          JSON.stringify(item.options || {}),
+        ]
+      );
+    }
+
+    const updatedOrder = await client.query(
+      `UPDATE orders 
+       SET total = $1
+       WHERE id = $2
+       RETURNING *`,
+      [total, id]
+    );
+
+    await client.query("COMMIT");
+
+    io.emit("order_updated", updatedOrder.rows[0]);
+
+    res.json(updatedOrder.rows[0]);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error(error);
+    res.status(500).json({ error: "Error actualizando orden" });
+  } finally {
+    client.release();
   }
 });
 
