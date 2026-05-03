@@ -516,9 +516,7 @@ app.post("/seed-menu-maranba", auth(["admin"]), async (req, res) => {
     res.status(500).json({ error: "Error cargando menú Maranba" });
   }
 });
-app.post("/seed-menu-maranba", async (req, res) => {
-  res.json({ ok: true, message: "Funciona" });
-});
+
 app.post("/orders", auth(["admin", "mesero"]), async (req, res) => {
   const client = await pool.connect();
 
