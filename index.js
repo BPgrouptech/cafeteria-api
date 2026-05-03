@@ -411,7 +411,8 @@ app.delete("/product-options/:id", auth(["admin"]), async (req, res) => {
   }
 });
 
-app.post("/seed-menu-maranba", auth(["admin"]), async (req, res) => {
+//app.post("/seed-menu-maranba", auth(["admin"]), async (req, res) => {
+app.post("/seed-menu-maranba", async (req, res) => {
   try {
     const menu = [
       // CON CAFÉ
