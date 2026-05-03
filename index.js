@@ -411,6 +411,114 @@ app.delete("/product-options/:id", auth(["admin"]), async (req, res) => {
   }
 });
 
+app.post("/seed-menu-maranba", auth(["admin"]), async (req, res) => {
+  try {
+    const menu = [
+      // CON CAFÉ
+      { name: "Expreso sencillo", category: "Con Café", price: 35 },
+      { name: "Expreso pistache", category: "Con Café", price: 90 },
+      { name: "Café de olla", category: "Con Café", price: 65 },
+      { name: "Americano", category: "Con Café", price: 45 },
+      { name: "Capuchino", category: "Con Café", price: 65 },
+      { name: "Latte", category: "Con Café", price: 75 },
+      { name: "Caramel macchiato", category: "Con Café", price: 75 },
+      { name: "Mocha / Vainilla", category: "Con Café", price: 75 },
+      { name: "Dirty chai", category: "Con Café", price: 90 },
+      { name: "Americano limón", category: "Con Café", price: 60 },
+      { name: "Choko nube", category: "Con Café", price: 125 },
+      { name: "Zuca nube", category: "Con Café", price: 125 },
+      { name: "Dalgona coffee", category: "Con Café", price: 100 },
+      { name: "Chocolate", category: "Con Café", price: 80 },
+      { name: "Miss Coffee", category: "Con Café", price: 100 },
+      { name: "Cookie nube", category: "Con Café", price: 125 },
+      { name: "White mocha", category: "Con Café", price: 95 },
+
+      // SIN CAFÉ
+      { name: "Chai", category: "Sin Café", price: 80 },
+      { name: "Matcha", category: "Sin Café", price: 90 },
+      { name: "Tisanate", category: "Sin Café", price: 80 },
+      { name: "Oreo frappé", category: "Sin Café", price: 90 },
+      { name: "Soda italiana", category: "Sin Café", price: 90 },
+      { name: "Taro", category: "Sin Café", price: 90 },
+
+      // JUGOS
+      { name: "Jugo de naranja", category: "Jugos", price: 60 },
+      { name: "Jugo verde", category: "Jugos", price: 75 },
+      { name: "Agua fresca", category: "Jugos", price: 35 },
+      { name: "Shot inmune", category: "Jugos", price: 40 },
+      { name: "Shot detox", category: "Jugos", price: 35 },
+
+      // SMOOTHIE
+      { name: "Chunky Monkey", category: "Smoothie", price: 80 },
+      { name: "Frutos rojos", category: "Smoothie", price: 80 },
+      { name: "Tropical", category: "Smoothie", price: 75 },
+
+      // TRAGUITOS
+      { name: "Carajillo", category: "Traguitos", price: 120 },
+      { name: "Carajillo plátano Turin-Mazapán", category: "Traguitos", price: 150 },
+      { name: "Vino rosado", category: "Traguitos", price: 140 },
+      { name: "Vino tinto", category: "Traguitos", price: 140 },
+      { name: "Mimosa", category: "Traguitos", price: 130 },
+      { name: "Beso de ángel", category: "Traguitos", price: 160 },
+
+      // OTRAS BEBIDAS
+      { name: "Vaso de leche", category: "Otras Bebidas", price: 25 },
+      { name: "Botella de agua", category: "Otras Bebidas", price: 25 },
+      { name: "Coca Cola", category: "Otras Bebidas", price: 30 },
+
+      // ALIMENTOS
+      { name: "Avocado toast de salmón", category: "Alimentos", price: 220 },
+      { name: "Avocado toast con huevo", category: "Alimentos", price: 150 },
+      { name: "Panini jamón y queso", category: "Alimentos", price: 120 },
+      { name: "Panini con pepperoni y queso español", category: "Alimentos", price: 140 },
+      { name: "Panini 4 quesos", category: "Alimentos", price: 130 },
+      { name: "Yogurt con fruta", category: "Alimentos", price: 100 },
+      { name: "Cóctel de frutas", category: "Alimentos", price: 90 },
+      { name: "Hot cakes", category: "Alimentos", price: 140 },
+      { name: "Ensalada de pollo", category: "Alimentos", price: 130 },
+      { name: "Ensalada de atún", category: "Alimentos", price: 110 },
+      { name: "Pizza pepperoni", category: "Alimentos", price: 130 },
+
+      // POSTRES
+      { name: "Rol de canela", category: "Postres", price: 65 },
+      { name: "Galleta chocochip", category: "Postres", price: 40 },
+      { name: "Choco flan", category: "Postres", price: 95 },
+      { name: "Panqué de elote", category: "Postres", price: 55 },
+      { name: "Brownie", category: "Postres", price: 45 },
+      { name: "Concha", category: "Postres", price: 45 },
+      { name: "Concha especial", category: "Postres", price: 70 },
+      { name: "Pay de queso", category: "Postres", price: 60 },
+      { name: "Cupcake de zanahoria", category: "Postres", price: 40 },
+      { name: "Cheese cake guayaba", category: "Postres", price: 120 },
+      { name: "Panqué de plátano", category: "Postres", price: 60 },
+      { name: "Rebanada de zanahoria", category: "Postres", price: 120 },
+      { name: "Rebanada de chocolate", category: "Postres", price: 115 },
+    ];
+
+    for (const item of menu) {
+      await pool.query(
+        `
+        INSERT INTO products (name, description, price, category, active)
+        VALUES ($1, $2, $3, $4, TRUE)
+        ON CONFLICT DO NOTHING
+        `,
+        [item.name, "", item.price, item.category]
+      );
+    }
+
+    res.json({
+      ok: true,
+      message: "Menú Maranba cargado correctamente",
+      total: menu.length,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error cargando menú Maranba" });
+  }
+});
+app.post("/seed-menu-maranba", async (req, res) => {
+  res.json({ ok: true, message: "Funciona" });
+});
 app.post("/orders", auth(["admin", "mesero"]), async (req, res) => {
   const client = await pool.connect();
 
