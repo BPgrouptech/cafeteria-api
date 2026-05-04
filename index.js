@@ -138,6 +138,7 @@ app.get("/create-tables", async (req, res) => {
         waiter_id INTEGER REFERENCES users(id),
         status TEXT NOT NULL DEFAULT 'pendiente' CHECK (status IN ('pendiente', 'completado', 'cancelado')),
         total NUMERIC(10,2) NOT NULL DEFAULT 0,
+        table_number INTEGER,
         created_at TIMESTAMP DEFAULT NOW(),
         completed_at TIMESTAMP
       );
@@ -158,6 +159,23 @@ app.get("/create-tables", async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error creando tablas" });
+  }
+});
+
+app.get("/fix-orders-table-number", async (req, res) => {
+  try {
+    await pool.query(`
+      ALTER TABLE orders 
+      ADD COLUMN IF NOT EXISTS table_number INTEGER;
+    `);
+
+    res.json({
+      ok: true,
+      message: "Campo table_number agregado correctamente",
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error agregando table_number" });
   }
 });
 
@@ -190,10 +208,9 @@ app.post("/login", async (req, res) => {
   try {
     const { username, password } = req.body;
 
-    const result = await pool.query(
-      "SELECT * FROM users WHERE username = $1",
-      [username]
-    );
+    const result = await pool.query("SELECT * FROM users WHERE username = $1", [
+      username,
+    ]);
 
     if (result.rows.length === 0) {
       return res.status(401).json({ error: "Usuario o contraseña incorrectos" });
@@ -297,48 +314,57 @@ app.get("/products", auth(["admin", "mesero", "barista"]), async (req, res) => {
   }
 });
 
-app.post("/products", auth(["admin"]), upload.single("image"), async (req, res) => {
-  try {
-    const { name, description, price, category } = req.body;
+app.post(
+  "/products",
+  auth(["admin"]),
+  upload.single("image"),
+  async (req, res) => {
+    try {
+      const { name, description, price, category } = req.body;
 
-    let imageKey = null;
+      let imageKey = null;
 
-    if (req.file) {
-      imageKey = await uploadToR2(req.file);
-    }
+      if (req.file) {
+        imageKey = await uploadToR2(req.file);
+      }
 
-    const result = await pool.query(
-      `INSERT INTO products (name, description, price, category, image_key)
+      const result = await pool.query(
+        `INSERT INTO products (name, description, price, category, image_key)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [name, description, price, category, imageKey]
-    );
+        [name, description, price, category, imageKey]
+      );
 
-    const product = result.rows[0];
+      const product = result.rows[0];
 
-    res.json({
-      ...product,
-      image_url: await getSignedImageUrl(product.image_key),
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Error creando producto" });
-  }
-});
-
-app.put("/products/:id", auth(["admin"]), upload.single("image"), async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { name, description, price, category, active } = req.body;
-
-    let imageKey = req.body.image_key || null;
-
-    if (req.file) {
-      imageKey = await uploadToR2(req.file);
+      res.json({
+        ...product,
+        image_url: await getSignedImageUrl(product.image_key),
+      });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Error creando producto" });
     }
+  }
+);
 
-    const result = await pool.query(
-      `UPDATE products
+app.put(
+  "/products/:id",
+  auth(["admin"]),
+  upload.single("image"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { name, description, price, category, active } = req.body;
+
+      let imageKey = req.body.image_key || null;
+
+      if (req.file) {
+        imageKey = await uploadToR2(req.file);
+      }
+
+      const result = await pool.query(
+        `UPDATE products
        SET name = $1,
            description = $2,
            price = $3,
@@ -347,24 +373,25 @@ app.put("/products/:id", auth(["admin"]), upload.single("image"), async (req, re
            image_key = COALESCE($6, image_key)
        WHERE id = $7
        RETURNING *`,
-      [name, description, price, category, active ?? true, imageKey, id]
-    );
+        [name, description, price, category, active ?? true, imageKey, id]
+      );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Producto no encontrado" });
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: "Producto no encontrado" });
+      }
+
+      const product = result.rows[0];
+
+      res.json({
+        ...product,
+        image_url: await getSignedImageUrl(product.image_key),
+      });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Error actualizando producto" });
     }
-
-    const product = result.rows[0];
-
-    res.json({
-      ...product,
-      image_url: await getSignedImageUrl(product.image_key),
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Error actualizando producto" });
   }
-});
+);
 
 app.delete("/products/:id", auth(["admin"]), async (req, res) => {
   try {
@@ -412,10 +439,8 @@ app.delete("/product-options/:id", auth(["admin"]), async (req, res) => {
 });
 
 app.post("/seed-menu-maranba", auth(["admin"]), async (req, res) => {
-//app.post("/seed-menu-maranba", async (req, res) => {
   try {
     const menu = [
-      // CON CAFÉ
       { name: "Expreso sencillo", category: "Con Café", price: 35 },
       { name: "Expreso pistache", category: "Con Café", price: 90 },
       { name: "Café de olla", category: "Con Café", price: 65 },
@@ -433,45 +458,41 @@ app.post("/seed-menu-maranba", auth(["admin"]), async (req, res) => {
       { name: "Miss Coffee", category: "Con Café", price: 100 },
       { name: "Cookie nube", category: "Con Café", price: 125 },
       { name: "White mocha", category: "Con Café", price: 95 },
-
-      // SIN CAFÉ
       { name: "Chai", category: "Sin Café", price: 80 },
       { name: "Matcha", category: "Sin Café", price: 90 },
       { name: "Tisanate", category: "Sin Café", price: 80 },
       { name: "Oreo frappé", category: "Sin Café", price: 90 },
       { name: "Soda italiana", category: "Sin Café", price: 90 },
       { name: "Taro", category: "Sin Café", price: 90 },
-
-      // JUGOS
       { name: "Jugo de naranja", category: "Jugos", price: 60 },
       { name: "Jugo verde", category: "Jugos", price: 75 },
       { name: "Agua fresca", category: "Jugos", price: 35 },
       { name: "Shot inmune", category: "Jugos", price: 40 },
       { name: "Shot detox", category: "Jugos", price: 35 },
-
-      // SMOOTHIE
       { name: "Chunky Monkey", category: "Smoothie", price: 80 },
       { name: "Frutos rojos", category: "Smoothie", price: 80 },
       { name: "Tropical", category: "Smoothie", price: 75 },
-
-      // TRAGUITOS
       { name: "Carajillo", category: "Traguitos", price: 120 },
-      { name: "Carajillo plátano Turin-Mazapán", category: "Traguitos", price: 150 },
+      {
+        name: "Carajillo plátano Turin-Mazapán",
+        category: "Traguitos",
+        price: 150,
+      },
       { name: "Vino rosado", category: "Traguitos", price: 140 },
       { name: "Vino tinto", category: "Traguitos", price: 140 },
       { name: "Mimosa", category: "Traguitos", price: 130 },
       { name: "Beso de ángel", category: "Traguitos", price: 160 },
-
-      // OTRAS BEBIDAS
       { name: "Vaso de leche", category: "Otras Bebidas", price: 25 },
       { name: "Botella de agua", category: "Otras Bebidas", price: 25 },
       { name: "Coca Cola", category: "Otras Bebidas", price: 30 },
-
-      // ALIMENTOS
       { name: "Avocado toast de salmón", category: "Alimentos", price: 220 },
       { name: "Avocado toast con huevo", category: "Alimentos", price: 150 },
       { name: "Panini jamón y queso", category: "Alimentos", price: 120 },
-      { name: "Panini con pepperoni y queso español", category: "Alimentos", price: 140 },
+      {
+        name: "Panini con pepperoni y queso español",
+        category: "Alimentos",
+        price: 140,
+      },
       { name: "Panini 4 quesos", category: "Alimentos", price: 130 },
       { name: "Yogurt con fruta", category: "Alimentos", price: 100 },
       { name: "Cóctel de frutas", category: "Alimentos", price: 90 },
@@ -479,8 +500,6 @@ app.post("/seed-menu-maranba", auth(["admin"]), async (req, res) => {
       { name: "Ensalada de pollo", category: "Alimentos", price: 130 },
       { name: "Ensalada de atún", category: "Alimentos", price: 110 },
       { name: "Pizza pepperoni", category: "Alimentos", price: 130 },
-
-      // POSTRES
       { name: "Rol de canela", category: "Postres", price: 65 },
       { name: "Galleta chocochip", category: "Postres", price: 40 },
       { name: "Choco flan", category: "Postres", price: 95 },
@@ -522,7 +541,11 @@ app.post("/orders", auth(["admin", "mesero"]), async (req, res) => {
   const client = await pool.connect();
 
   try {
-    const { items } = req.body;
+    const { items, table_number } = req.body;
+
+    if (!table_number) {
+      return res.status(400).json({ error: "Número de mesa requerido" });
+    }
 
     if (!items || items.length === 0) {
       return res.status(400).json({ error: "La orden no tiene productos" });
@@ -533,10 +556,10 @@ app.post("/orders", auth(["admin", "mesero"]), async (req, res) => {
     let total = 0;
 
     const orderResult = await client.query(
-      `INSERT INTO orders (waiter_id, status, total)
-       VALUES ($1, 'pendiente', 0)
+      `INSERT INTO orders (waiter_id, status, total, table_number)
+       VALUES ($1, 'pendiente', 0, $2)
        RETURNING *`,
-      [req.user.id]
+      [req.user.id, Number(table_number)]
     );
 
     const order = orderResult.rows[0];
@@ -580,7 +603,8 @@ app.post("/orders", auth(["admin", "mesero"]), async (req, res) => {
     );
 
     await client.query("COMMIT");
-io.emit("new_order", finalOrder.rows[0]);
+
+    io.emit("new_order", finalOrder.rows[0]);
 
     res.json(finalOrder.rows[0]);
   } catch (error) {
@@ -592,9 +616,12 @@ io.emit("new_order", finalOrder.rows[0]);
   }
 });
 
-app.get("/orders/pending", auth(["admin", "barista", "mesero"]), async (req, res) => {
-  try {
-    const result = await pool.query(`
+app.get(
+  "/orders/pending",
+  auth(["admin", "barista", "mesero"]),
+  async (req, res) => {
+    try {
+      const result = await pool.query(`
       SELECT 
         o.*,
         u.name AS waiter_name,
@@ -620,19 +647,24 @@ app.get("/orders/pending", auth(["admin", "barista", "mesero"]), async (req, res
       ORDER BY o.created_at ASC
     `);
 
-    res.json(result.rows);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Error obteniendo órdenes" });
+      res.json(result.rows);
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Error obteniendo órdenes" });
+    }
   }
-});
+);
 
 app.put("/orders/:id", auth(["admin", "mesero"]), async (req, res) => {
   const client = await pool.connect();
 
   try {
     const { id } = req.params;
-    const { items } = req.body;
+    const { items, table_number } = req.body;
+
+    if (!table_number) {
+      return res.status(400).json({ error: "Número de mesa requerido" });
+    }
 
     if (!items || items.length === 0) {
       return res.status(400).json({ error: "La orden no tiene productos" });
@@ -692,10 +724,11 @@ app.put("/orders/:id", auth(["admin", "mesero"]), async (req, res) => {
 
     const updatedOrder = await client.query(
       `UPDATE orders 
-       SET total = $1
-       WHERE id = $2
+       SET total = $1,
+           table_number = $2
+       WHERE id = $3
        RETURNING *`,
-      [total, id]
+      [total, Number(table_number), id]
     );
 
     await client.query("COMMIT");
@@ -724,7 +757,9 @@ app.put("/orders/:id/complete", auth(["admin", "barista"]), async (req, res) => 
        RETURNING *`,
       [id]
     );
-io.emit("order_completed", result.rows[0]);
+
+    io.emit("order_completed", result.rows[0]);
+
     res.json(result.rows[0]);
   } catch (error) {
     console.error(error);
