@@ -111,7 +111,7 @@ app.get("/create-tables", async (req, res) => {
         name TEXT NOT NULL,
         username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
-        role TEXT NOT NULL CHECK (role IN ('admin', 'mesero', 'barista')),
+        role TEXT NOT NULL CHECK (role IN ('admin', 'mesero', 'barista', 'cajero')),
         created_at TIMESTAMP DEFAULT NOW()
       );
 
@@ -136,11 +136,12 @@ app.get("/create-tables", async (req, res) => {
       CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
         waiter_id INTEGER REFERENCES users(id),
-        status TEXT NOT NULL DEFAULT 'pendiente' CHECK (status IN ('pendiente', 'completado', 'cancelado')),
+        status TEXT NOT NULL DEFAULT 'pendiente' CHECK (status IN ('pendiente', 'completado', 'cancelado', 'pagado')),
         total NUMERIC(10,2) NOT NULL DEFAULT 0,
         table_number INTEGER,
         created_at TIMESTAMP DEFAULT NOW(),
-        completed_at TIMESTAMP
+        completed_at TIMESTAMP,
+        paid_at TIMESTAMP
       );
 
       CREATE TABLE IF NOT EXISTS order_items (
@@ -176,6 +177,27 @@ app.get("/fix-orders-table-number", async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error agregando table_number" });
+  }
+});
+
+app.get("/fix-cajero", async (req, res) => {
+  try {
+    await pool.query(`
+      ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+      ALTER TABLE users ADD CONSTRAINT users_role_check
+        CHECK (role IN ('admin', 'mesero', 'barista', 'cajero'));
+
+      ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_status_check;
+      ALTER TABLE orders ADD CONSTRAINT orders_status_check
+        CHECK (status IN ('pendiente', 'completado', 'cancelado', 'pagado'));
+
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at TIMESTAMP;
+    `);
+
+    res.json({ ok: true, message: "Migración cajero completada" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error en migración cajero" });
   }
 });
 
@@ -253,7 +275,7 @@ app.post("/users", auth(["admin"]), async (req, res) => {
   try {
     const { name, username, password, role } = req.body;
 
-    if (!["admin", "mesero", "barista"].includes(role)) {
+    if (!["admin", "mesero", "barista", "cajero"].includes(role)) {
       return res.status(400).json({ error: "Rol inválido" });
     }
 
@@ -278,7 +300,7 @@ app.post("/users", auth(["admin"]), async (req, res) => {
   }
 });
 
-app.get("/products", auth(["admin", "mesero", "barista"]), async (req, res) => {
+app.get("/products", auth(["admin", "mesero", "barista", "cajero"]), async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT 
@@ -655,6 +677,66 @@ app.get(
   }
 );
 
+app.get("/orders/open", auth(["admin", "cajero"]), async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        o.*,
+        u.name AS waiter_name,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'id', oi.id,
+              'product_name', oi.product_name,
+              'quantity', oi.quantity,
+              'unit_price', oi.unit_price,
+              'notes', oi.notes,
+              'options', oi.options_json
+            )
+          ) FILTER (WHERE oi.id IS NOT NULL),
+          '[]'
+        ) AS items
+      FROM orders o
+      LEFT JOIN users u ON u.id = o.waiter_id
+      LEFT JOIN order_items oi ON oi.order_id = o.id
+      WHERE o.status IN ('pendiente', 'completado')
+      GROUP BY o.id, u.name
+      ORDER BY o.created_at ASC
+    `);
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error obteniendo cuentas abiertas" });
+  }
+});
+
+app.put("/orders/:id/pay", auth(["admin", "cajero"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `UPDATE orders
+       SET status = 'pagado',
+           paid_at = NOW()
+       WHERE id = $1 AND status IN ('pendiente', 'completado')
+       RETURNING *`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Cuenta no encontrada o ya fue pagada" });
+    }
+
+    io.emit("order_paid", result.rows[0]);
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error registrando pago" });
+  }
+});
+
 app.put("/orders/:id", auth(["admin", "mesero"]), async (req, res) => {
   const client = await pool.connect();
 
@@ -788,8 +870,25 @@ app.put("/orders/:id/cancel", auth(["admin"]), async (req, res) => {
 
 app.get("/orders/history", auth(["admin"]), async (req, res) => {
   try {
+    const { month, year } = req.query;
+
+    const conditions = [];
+    const params = [];
+
+    if (year) {
+      params.push(Number(year));
+      conditions.push(`EXTRACT(YEAR FROM o.created_at) = $${params.length}`);
+    }
+
+    if (month) {
+      params.push(Number(month));
+      conditions.push(`EXTRACT(MONTH FROM o.created_at) = $${params.length}`);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
     const result = await pool.query(`
-      SELECT 
+      SELECT
         o.*,
         u.name AS waiter_name,
         COALESCE(
@@ -807,15 +906,66 @@ app.get("/orders/history", auth(["admin"]), async (req, res) => {
       FROM orders o
       LEFT JOIN users u ON u.id = o.waiter_id
       LEFT JOIN order_items oi ON oi.order_id = o.id
+      ${where}
       GROUP BY o.id, u.name
       ORDER BY o.created_at DESC
-      LIMIT 200
-    `);
+      LIMIT 500
+    `, params);
 
     res.json(result.rows);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error obteniendo historial" });
+  }
+});
+
+app.get("/ventas/resumen", auth(["admin"]), async (req, res) => {
+  try {
+    const { month, year } = req.query;
+
+    const conditions = ["o.status = 'pagado'"];
+    const params = [];
+
+    if (year) {
+      params.push(Number(year));
+      conditions.push(`EXTRACT(YEAR FROM o.paid_at) = $${params.length}`);
+    }
+
+    if (month) {
+      params.push(Number(month));
+      conditions.push(`EXTRACT(MONTH FROM o.paid_at) = $${params.length}`);
+    }
+
+    const where = `WHERE ${conditions.join(" AND ")}`;
+
+    const [productsResult, totalsResult] = await Promise.all([
+      pool.query(`
+        SELECT
+          oi.product_name,
+          SUM(oi.quantity) AS total_cantidad,
+          SUM(oi.quantity * oi.unit_price) AS total_vendido
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        ${where}
+        GROUP BY oi.product_name
+        ORDER BY total_vendido DESC
+      `, params),
+      pool.query(`
+        SELECT
+          COUNT(*) AS total_ordenes,
+          COALESCE(SUM(o.total), 0) AS total_ingresos
+        FROM orders o
+        ${where}
+      `, params),
+    ]);
+
+    res.json({
+      resumen: totalsResult.rows[0],
+      productos: productsResult.rows,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error obteniendo resumen de ventas" });
   }
 });
 
