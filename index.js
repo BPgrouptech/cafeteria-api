@@ -201,6 +201,18 @@ app.get("/fix-cajero", async (req, res) => {
   }
 });
 
+app.get("/reset-orders", async (req, res) => {
+  try {
+    await pool.query(`
+      TRUNCATE order_items, orders RESTART IDENTITY CASCADE;
+    `);
+    res.json({ ok: true, message: "Historial de pedidos eliminado" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error eliminando pedidos" });
+  }
+});
+
 app.post("/create-admin", async (req, res) => {
   try {
     const { name, username, password } = req.body;
