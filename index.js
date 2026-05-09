@@ -139,6 +139,7 @@ app.get("/create-tables", async (req, res) => {
         status TEXT NOT NULL DEFAULT 'pendiente' CHECK (status IN ('pendiente', 'completado', 'cancelado', 'pagado')),
         total NUMERIC(10,2) NOT NULL DEFAULT 0,
         table_number INTEGER,
+        payment_method TEXT CHECK (payment_method IN ('efectivo', 'tarjeta')),
         amount_paid NUMERIC(10,2),
         change_given NUMERIC(10,2),
         created_at TIMESTAMP DEFAULT NOW(),
@@ -208,9 +209,10 @@ app.get("/fix-payment-columns", async (req, res) => {
     await pool.query(`
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS amount_paid NUMERIC(10,2);
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS change_given NUMERIC(10,2);
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method TEXT;
     `);
 
-    res.json({ ok: true, message: "Columnas de pago y cambio agregadas" });
+    res.json({ ok: true, message: "Columnas de pago, cambio y método agregadas" });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error en migración de columnas de pago" });
@@ -742,7 +744,11 @@ app.get("/orders/open", auth(["admin", "cajero"]), async (req, res) => {
 app.put("/orders/:id/pay", auth(["admin", "cajero"]), async (req, res) => {
   try {
     const { id } = req.params;
-    const { amount_paid } = req.body;
+    const { payment_method, amount_paid } = req.body;
+
+    if (!["efectivo", "tarjeta"].includes(payment_method)) {
+      return res.status(400).json({ error: "Método de pago inválido. Usa 'efectivo' o 'tarjeta'" });
+    }
 
     const orderResult = await pool.query(
       "SELECT * FROM orders WHERE id = $1 AND status IN ('pendiente', 'completado')",
@@ -756,36 +762,42 @@ app.put("/orders/:id/pay", auth(["admin", "cajero"]), async (req, res) => {
     const order = orderResult.rows[0];
     const total = Number(order.total);
 
-    if (amount_paid === undefined || amount_paid === null) {
-      return res.status(400).json({ error: "Monto recibido requerido (amount_paid)" });
+    let paid = total;
+    let change = 0;
+
+    if (payment_method === "efectivo") {
+      if (amount_paid === undefined || amount_paid === null) {
+        return res.status(400).json({ error: "Con efectivo debes enviar el monto recibido (amount_paid)" });
+      }
+
+      paid = Number(amount_paid);
+
+      if (isNaN(paid) || paid < 0) {
+        return res.status(400).json({ error: "Monto recibido inválido" });
+      }
+
+      if (paid < total) {
+        return res.status(400).json({
+          error: "El monto recibido es menor al total",
+          total,
+          amount_paid: paid,
+          faltante: Number((total - paid).toFixed(2)),
+        });
+      }
+
+      change = Number((paid - total).toFixed(2));
     }
-
-    const paid = Number(amount_paid);
-
-    if (isNaN(paid) || paid < 0) {
-      return res.status(400).json({ error: "Monto recibido inválido" });
-    }
-
-    if (paid < total) {
-      return res.status(400).json({
-        error: "El monto recibido es menor al total",
-        total,
-        amount_paid: paid,
-        faltante: Number((total - paid).toFixed(2)),
-      });
-    }
-
-    const change = Number((paid - total).toFixed(2));
 
     const result = await pool.query(
       `UPDATE orders
        SET status = 'pagado',
            paid_at = NOW(),
-           amount_paid = $2,
-           change_given = $3
+           payment_method = $2,
+           amount_paid = $3,
+           change_given = $4
        WHERE id = $1
        RETURNING *`,
-      [id, paid, change]
+      [id, payment_method, paid, change]
     );
 
     io.emit("order_paid", result.rows[0]);
