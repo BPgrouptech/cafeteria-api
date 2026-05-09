@@ -139,6 +139,8 @@ app.get("/create-tables", async (req, res) => {
         status TEXT NOT NULL DEFAULT 'pendiente' CHECK (status IN ('pendiente', 'completado', 'cancelado', 'pagado')),
         total NUMERIC(10,2) NOT NULL DEFAULT 0,
         table_number INTEGER,
+        amount_paid NUMERIC(10,2),
+        change_given NUMERIC(10,2),
         created_at TIMESTAMP DEFAULT NOW(),
         completed_at TIMESTAMP,
         paid_at TIMESTAMP
@@ -198,6 +200,20 @@ app.get("/fix-cajero", async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error en migración cajero" });
+  }
+});
+
+app.get("/fix-payment-columns", async (req, res) => {
+  try {
+    await pool.query(`
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS amount_paid NUMERIC(10,2);
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS change_given NUMERIC(10,2);
+    `);
+
+    res.json({ ok: true, message: "Columnas de pago y cambio agregadas" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error en migración de columnas de pago" });
   }
 });
 
@@ -726,23 +742,58 @@ app.get("/orders/open", auth(["admin", "cajero"]), async (req, res) => {
 app.put("/orders/:id/pay", auth(["admin", "cajero"]), async (req, res) => {
   try {
     const { id } = req.params;
+    const { amount_paid } = req.body;
+
+    const orderResult = await pool.query(
+      "SELECT * FROM orders WHERE id = $1 AND status IN ('pendiente', 'completado')",
+      [id]
+    );
+
+    if (orderResult.rows.length === 0) {
+      return res.status(404).json({ error: "Cuenta no encontrada o ya fue pagada" });
+    }
+
+    const order = orderResult.rows[0];
+    const total = Number(order.total);
+
+    if (amount_paid === undefined || amount_paid === null) {
+      return res.status(400).json({ error: "Monto recibido requerido (amount_paid)" });
+    }
+
+    const paid = Number(amount_paid);
+
+    if (isNaN(paid) || paid < 0) {
+      return res.status(400).json({ error: "Monto recibido inválido" });
+    }
+
+    if (paid < total) {
+      return res.status(400).json({
+        error: "El monto recibido es menor al total",
+        total,
+        amount_paid: paid,
+        faltante: Number((total - paid).toFixed(2)),
+      });
+    }
+
+    const change = Number((paid - total).toFixed(2));
 
     const result = await pool.query(
       `UPDATE orders
        SET status = 'pagado',
-           paid_at = NOW()
-       WHERE id = $1 AND status IN ('pendiente', 'completado')
+           paid_at = NOW(),
+           amount_paid = $2,
+           change_given = $3
+       WHERE id = $1
        RETURNING *`,
-      [id]
+      [id, paid, change]
     );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Cuenta no encontrada o ya fue pagada" });
-    }
 
     io.emit("order_paid", result.rows[0]);
 
-    res.json(result.rows[0]);
+    res.json({
+      ...result.rows[0],
+      cambio: change,
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error registrando pago" });
