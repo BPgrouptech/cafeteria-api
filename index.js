@@ -448,13 +448,25 @@ app.put(
 app.delete("/products/:id", auth(["admin"]), async (req, res) => {
   try {
     const { id } = req.params;
+    const { password } = req.body;
+
+    if (!password) {
+      return res.status(400).json({ error: "Contraseña requerida" });
+    }
+
+    const userResult = await pool.query("SELECT * FROM users WHERE id = $1", [req.user.id]);
+    const valid = await bcrypt.compare(password, userResult.rows[0].password_hash);
+
+    if (!valid) {
+      return res.status(401).json({ error: "Contraseña incorrecta" });
+    }
 
     await pool.query("UPDATE products SET active = FALSE WHERE id = $1", [id]);
 
-    res.json({ ok: true, message: "Producto desactivado" });
+    res.json({ ok: true, message: "Elemento eliminado del menú" });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error eliminando producto" });
+    res.status(500).json({ error: "Error eliminando elemento del menú" });
   }
 });
 
