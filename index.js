@@ -293,6 +293,19 @@ app.get("/reset-orders", async (req, res) => {
   }
 });
 
+app.get("/reset-sistema", async (req, res) => {
+  try {
+    await pool.query(`
+      TRUNCATE order_items, orders RESTART IDENTITY CASCADE;
+      TRUNCATE caja_diaria RESTART IDENTITY;
+    `);
+    res.json({ ok: true, message: "Sistema reiniciado: órdenes y caja eliminados" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error reiniciando sistema" });
+  }
+});
+
 app.post("/create-admin", async (req, res) => {
   try {
     const { name, username, password } = req.body;
