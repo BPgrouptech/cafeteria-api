@@ -1334,6 +1334,9 @@ app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
       RETURNING *
     `, [monto, req.user.id, notas || null]);
 
+    const estado = await isSistemaAbierto();
+    io.emit("sistema_cerrado", { hora_apertura: estado.hora_apertura });
+
     res.json({
       ok: true,
       message: "Caja cerrada correctamente",
