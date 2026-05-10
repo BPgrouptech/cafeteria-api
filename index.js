@@ -122,10 +122,17 @@ async function isSistemaAbierto() {
     }
 
     const [aperturaHour, aperturaMinute] = horaApertura.split(":").map(Number);
-    const aperturaHoy = new Date();
-    aperturaHoy.setHours(aperturaHour, aperturaMinute, 0, 0);
 
-    if (now >= aperturaHoy) {
+    // Calcular la PRÓXIMA apertura después del cierre (no "hoy a las X")
+    const nextApertura = new Date(cerradoAt);
+    nextApertura.setHours(aperturaHour, aperturaMinute, 0, 0);
+
+    // Si la hora de apertura ya pasó el mismo día del cierre, es el día siguiente
+    if (nextApertura <= cerradoAt) {
+      nextApertura.setDate(nextApertura.getDate() + 1);
+    }
+
+    if (now >= nextApertura) {
       return { abierto: true, hora_apertura: horaApertura };
     }
 
@@ -1256,8 +1263,8 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
       const anteriorResult = await pool.query(`
         SELECT caja_chica_cierre
         FROM caja_diaria
-        WHERE fecha < CURRENT_DATE AND caja_chica_cierre IS NOT NULL
-        ORDER BY fecha DESC
+        WHERE caja_chica_cierre IS NOT NULL
+        ORDER BY cerrado_at DESC
         LIMIT 1
       `);
 
@@ -1272,6 +1279,26 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
       `, [apertura]);
 
       caja = insertResult.rows[0];
+    } else if (cajaResult.rows[0].caja_chica_cierre !== null) {
+      // Registro de hoy existe pero está cerrado — verificar si el sistema ya reabrió
+      const estadoActual = await isSistemaAbierto();
+      if (estadoActual.abierto) {
+        // Nuevo ciclo del mismo día: llevar la caja chica como nueva apertura
+        const apertura = Number(cajaResult.rows[0].caja_chica_cierre);
+        const resetResult = await pool.query(`
+          UPDATE caja_diaria
+          SET caja_chica_apertura = $1,
+              caja_chica_cierre = NULL,
+              cerrado_por = NULL,
+              cerrado_at = NULL,
+              notas = NULL
+          WHERE fecha = CURRENT_DATE
+          RETURNING *
+        `, [apertura]);
+        caja = resetResult.rows[0];
+      } else {
+        caja = cajaResult.rows[0];
+      }
     } else {
       caja = cajaResult.rows[0];
     }
