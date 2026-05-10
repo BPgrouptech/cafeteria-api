@@ -96,6 +96,57 @@ function auth(requiredRoles = []) {
   };
 }
 
+async function isSistemaAbierto() {
+  try {
+    const configResult = await pool.query(
+      "SELECT valor FROM configuracion WHERE clave = 'hora_apertura'"
+    );
+    const horaApertura = configResult.rows.length > 0 ? configResult.rows[0].valor : "07:00";
+
+    const cerradoResult = await pool.query(`
+      SELECT cerrado_at FROM caja_diaria
+      WHERE caja_chica_cierre IS NOT NULL
+      ORDER BY cerrado_at DESC
+      LIMIT 1
+    `);
+
+    if (cerradoResult.rows.length === 0) {
+      return { abierto: true, hora_apertura: horaApertura };
+    }
+
+    const cerradoAt = new Date(cerradoResult.rows[0].cerrado_at);
+    const now = new Date();
+
+    if (now - cerradoAt > 24 * 60 * 60 * 1000) {
+      return { abierto: true, hora_apertura: horaApertura };
+    }
+
+    const [aperturaHour, aperturaMinute] = horaApertura.split(":").map(Number);
+    const aperturaHoy = new Date();
+    aperturaHoy.setHours(aperturaHour, aperturaMinute, 0, 0);
+
+    if (now >= aperturaHoy) {
+      return { abierto: true, hora_apertura: horaApertura };
+    }
+
+    return { abierto: false, hora_apertura: horaApertura };
+  } catch {
+    return { abierto: true, hora_apertura: "07:00" };
+  }
+}
+
+async function verificarSistemaAbierto(req, res, next) {
+  const estado = await isSistemaAbierto();
+  if (!estado.abierto) {
+    return res.status(503).json({
+      error: `El sistema está cerrado hasta las ${estado.hora_apertura}.`,
+      hora_apertura: estado.hora_apertura,
+      sistema_cerrado: true,
+    });
+  }
+  next();
+}
+
 app.get("/", (req, res) => {
   res.json({
     ok: true,
@@ -612,7 +663,7 @@ app.post("/seed-menu-maranba", auth(["admin"]), async (req, res) => {
   }
 });
 
-app.post("/orders", auth(["admin", "mesero"]), async (req, res) => {
+app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (req, res) => {
   const client = await pool.connect();
 
   try {
@@ -764,7 +815,7 @@ app.get("/orders/open", auth(["admin", "cajero"]), async (req, res) => {
   }
 });
 
-app.put("/orders/:id/pay", auth(["admin", "cajero"]), async (req, res) => {
+app.put("/orders/:id/pay", auth(["admin", "cajero"]), verificarSistemaAbierto, async (req, res) => {
   try {
     const { id } = req.params;
     const { payment_method, amount_paid } = req.body;
@@ -835,7 +886,7 @@ app.put("/orders/:id/pay", auth(["admin", "cajero"]), async (req, res) => {
   }
 });
 
-app.put("/orders/:id", auth(["admin", "mesero"]), async (req, res) => {
+app.put("/orders/:id", auth(["admin", "mesero"]), verificarSistemaAbierto, async (req, res) => {
   const client = await pool.connect();
 
   try {
@@ -925,7 +976,7 @@ app.put("/orders/:id", auth(["admin", "mesero"]), async (req, res) => {
   }
 });
 
-app.put("/orders/:id/complete", auth(["admin", "barista"]), async (req, res) => {
+app.put("/orders/:id/complete", auth(["admin", "barista"]), verificarSistemaAbierto, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -1096,6 +1147,56 @@ app.get("/ventas/resumen", auth(["admin"]), async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error obteniendo resumen de ventas" });
+  }
+});
+
+app.get("/fix-configuracion", async (req, res) => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS configuracion (
+        clave TEXT PRIMARY KEY,
+        valor TEXT NOT NULL,
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+      INSERT INTO configuracion (clave, valor)
+      VALUES ('hora_apertura', '07:00')
+      ON CONFLICT (clave) DO NOTHING;
+    `);
+    res.json({ ok: true, message: "Tabla configuracion creada" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error creando tabla configuracion" });
+  }
+});
+
+app.get("/sistema/estado", auth(["admin", "mesero", "barista", "cajero"]), async (req, res) => {
+  try {
+    const estado = await isSistemaAbierto();
+    res.json(estado);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error verificando estado del sistema" });
+  }
+});
+
+app.put("/configuracion/hora-apertura", auth(["admin"]), async (req, res) => {
+  try {
+    const { hora_apertura } = req.body;
+
+    if (!hora_apertura || !/^\d{2}:\d{2}$/.test(hora_apertura)) {
+      return res.status(400).json({ error: "Formato de hora inválido. Usa HH:MM (ej: 07:00)" });
+    }
+
+    await pool.query(`
+      INSERT INTO configuracion (clave, valor, updated_at)
+      VALUES ('hora_apertura', $1, NOW())
+      ON CONFLICT (clave) DO UPDATE SET valor = $1, updated_at = NOW()
+    `, [hora_apertura]);
+
+    res.json({ ok: true, hora_apertura });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error actualizando hora de apertura" });
   }
 });
 
