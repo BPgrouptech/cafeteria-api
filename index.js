@@ -157,6 +157,17 @@ app.get("/create-tables", async (req, res) => {
         notes TEXT,
         options_json JSONB NOT NULL DEFAULT '{}'::jsonb
       );
+
+      CREATE TABLE IF NOT EXISTS caja_diaria (
+        id SERIAL PRIMARY KEY,
+        fecha DATE UNIQUE NOT NULL,
+        caja_chica_apertura NUMERIC(10,2) NOT NULL DEFAULT 0,
+        caja_chica_cierre NUMERIC(10,2),
+        cerrado_por INTEGER REFERENCES users(id),
+        cerrado_at TIMESTAMP,
+        notas TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
     `);
 
     res.json({ ok: true, message: "Tablas creadas correctamente" });
@@ -1085,6 +1096,157 @@ app.get("/ventas/resumen", auth(["admin"]), async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error obteniendo resumen de ventas" });
+  }
+});
+
+app.get("/fix-caja-chica", async (req, res) => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS caja_diaria (
+        id SERIAL PRIMARY KEY,
+        fecha DATE UNIQUE NOT NULL,
+        caja_chica_apertura NUMERIC(10,2) NOT NULL DEFAULT 0,
+        caja_chica_cierre NUMERIC(10,2),
+        cerrado_por INTEGER REFERENCES users(id),
+        cerrado_at TIMESTAMP,
+        notas TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    res.json({ ok: true, message: "Tabla caja_diaria creada correctamente" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error creando tabla caja_diaria" });
+  }
+});
+
+app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
+  try {
+    const ventasResult = await pool.query(`
+      SELECT
+        COUNT(*) AS total_ordenes,
+        COALESCE(SUM(total), 0) AS total_ventas,
+        COALESCE(SUM(CASE WHEN payment_method = 'efectivo' THEN total ELSE 0 END), 0) AS ventas_efectivo,
+        COALESCE(SUM(CASE WHEN payment_method = 'tarjeta' THEN total ELSE 0 END), 0) AS ventas_tarjeta
+      FROM orders
+      WHERE status = 'pagado'
+        AND DATE(paid_at) = CURRENT_DATE
+    `);
+
+    let cajaResult = await pool.query(
+      "SELECT * FROM caja_diaria WHERE fecha = CURRENT_DATE"
+    );
+
+    let caja;
+    if (cajaResult.rows.length === 0) {
+      const anteriorResult = await pool.query(`
+        SELECT caja_chica_cierre
+        FROM caja_diaria
+        WHERE fecha < CURRENT_DATE AND caja_chica_cierre IS NOT NULL
+        ORDER BY fecha DESC
+        LIMIT 1
+      `);
+
+      const apertura = anteriorResult.rows.length > 0
+        ? Number(anteriorResult.rows[0].caja_chica_cierre)
+        : 0;
+
+      const insertResult = await pool.query(`
+        INSERT INTO caja_diaria (fecha, caja_chica_apertura)
+        VALUES (CURRENT_DATE, $1)
+        RETURNING *
+      `, [apertura]);
+
+      caja = insertResult.rows[0];
+    } else {
+      caja = cajaResult.rows[0];
+    }
+
+    const ventas = ventasResult.rows[0];
+    const ventasEfectivo = Number(ventas.ventas_efectivo);
+    const apertura = Number(caja.caja_chica_apertura);
+
+    res.json({
+      fecha: caja.fecha,
+      caja_chica_apertura: apertura,
+      ventas: {
+        efectivo: ventasEfectivo,
+        tarjeta: Number(ventas.ventas_tarjeta),
+        total: Number(ventas.total_ventas),
+        total_ordenes: Number(ventas.total_ordenes),
+      },
+      total_en_caja: Number((apertura + ventasEfectivo).toFixed(2)),
+      cerrado: caja.caja_chica_cierre !== null,
+      caja_chica_cierre: caja.caja_chica_cierre !== null ? Number(caja.caja_chica_cierre) : null,
+      cerrado_at: caja.cerrado_at || null,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error obteniendo resumen de caja" });
+  }
+});
+
+app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
+  try {
+    const { caja_chica, notas, password } = req.body;
+
+    if (caja_chica === undefined || caja_chica === null) {
+      return res.status(400).json({ error: "Monto de caja chica requerido" });
+    }
+
+    const monto = Number(caja_chica);
+    if (isNaN(monto) || monto < 0) {
+      return res.status(400).json({ error: "Monto de caja chica inválido" });
+    }
+
+    if (!password) {
+      return res.status(400).json({ error: "Contraseña requerida" });
+    }
+
+    const userResult = await pool.query("SELECT * FROM users WHERE id = $1", [req.user.id]);
+    const valid = await bcrypt.compare(password, userResult.rows[0].password_hash);
+    if (!valid) {
+      return res.status(401).json({ error: "Contraseña incorrecta" });
+    }
+
+    const result = await pool.query(`
+      INSERT INTO caja_diaria (fecha, caja_chica_apertura, caja_chica_cierre, cerrado_por, cerrado_at, notas)
+      VALUES (CURRENT_DATE, 0, $1, $2, NOW(), $3)
+      ON CONFLICT (fecha) DO UPDATE
+        SET caja_chica_cierre = $1,
+            cerrado_por = $2,
+            cerrado_at = NOW(),
+            notas = COALESCE($3, caja_diaria.notas)
+      RETURNING *
+    `, [monto, req.user.id, notas || null]);
+
+    res.json({
+      ok: true,
+      message: "Caja cerrada correctamente",
+      caja: result.rows[0],
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error cerrando caja" });
+  }
+});
+
+app.get("/caja/historial", auth(["admin"]), async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        cd.*,
+        u.name AS cerrado_por_nombre
+      FROM caja_diaria cd
+      LEFT JOIN users u ON u.id = cd.cerrado_por
+      ORDER BY cd.fecha DESC
+      LIMIT 90
+    `);
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error obteniendo historial de caja" });
   }
 });
 
