@@ -104,7 +104,7 @@ async function isSistemaAbierto() {
     const horaApertura = configResult.rows.length > 0 ? configResult.rows[0].valor : "07:00";
 
     const cerradoResult = await pool.query(`
-      SELECT cerrado_at FROM caja_diaria
+      SELECT cerrado_at, next_opening_at FROM caja_diaria
       WHERE caja_chica_cierre IS NOT NULL
       ORDER BY cerrado_at DESC
       LIMIT 1
@@ -114,25 +114,19 @@ async function isSistemaAbierto() {
       return { abierto: true, hora_apertura: horaApertura };
     }
 
-    const cerradoAt = new Date(cerradoResult.rows[0].cerrado_at);
+    const row = cerradoResult.rows[0];
     const now = new Date();
 
+    if (row.next_opening_at) {
+      return {
+        abierto: now >= new Date(row.next_opening_at),
+        hora_apertura: horaApertura,
+      };
+    }
+
+    // Fallback si no tiene next_opening_at: cerrado por 24h
+    const cerradoAt = new Date(row.cerrado_at);
     if (now - cerradoAt > 24 * 60 * 60 * 1000) {
-      return { abierto: true, hora_apertura: horaApertura };
-    }
-
-    const [aperturaHour, aperturaMinute] = horaApertura.split(":").map(Number);
-
-    // Calcular la PRÓXIMA apertura después del cierre (no "hoy a las X")
-    const nextApertura = new Date(cerradoAt);
-    nextApertura.setHours(aperturaHour, aperturaMinute, 0, 0);
-
-    // Si la hora de apertura ya pasó el mismo día del cierre, es el día siguiente
-    if (nextApertura <= cerradoAt) {
-      nextApertura.setDate(nextApertura.getDate() + 1);
-    }
-
-    if (now >= nextApertura) {
       return { abierto: true, hora_apertura: horaApertura };
     }
 
@@ -1170,6 +1164,18 @@ app.get("/ventas/resumen", auth(["admin"]), async (req, res) => {
   }
 });
 
+app.get("/fix-next-opening", async (req, res) => {
+  try {
+    await pool.query(`
+      ALTER TABLE caja_diaria ADD COLUMN IF NOT EXISTS next_opening_at TIMESTAMP;
+    `);
+    res.json({ ok: true, message: "Columna next_opening_at agregada" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error agregando columna" });
+  }
+});
+
 app.get("/fix-configuracion", async (req, res) => {
   try {
     await pool.query(`
@@ -1329,7 +1335,7 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
 
 app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
   try {
-    const { caja_chica, notas, password } = req.body;
+    const { caja_chica, notas, password, next_opening_at } = req.body;
 
     if (caja_chica === undefined || caja_chica === null) {
       return res.status(400).json({ error: "Monto de caja chica requerido" });
@@ -1351,15 +1357,16 @@ app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
     }
 
     const result = await pool.query(`
-      INSERT INTO caja_diaria (fecha, caja_chica_apertura, caja_chica_cierre, cerrado_por, cerrado_at, notas)
-      VALUES (CURRENT_DATE, 0, $1, $2, NOW(), $3)
+      INSERT INTO caja_diaria (fecha, caja_chica_apertura, caja_chica_cierre, cerrado_por, cerrado_at, notas, next_opening_at)
+      VALUES (CURRENT_DATE, 0, $1, $2, NOW(), $3, $4)
       ON CONFLICT (fecha) DO UPDATE
         SET caja_chica_cierre = $1,
             cerrado_por = $2,
             cerrado_at = NOW(),
-            notas = COALESCE($3, caja_diaria.notas)
+            notas = COALESCE($3, caja_diaria.notas),
+            next_opening_at = $4
       RETURNING *
-    `, [monto, req.user.id, notas || null]);
+    `, [monto, req.user.id, notas || null, next_opening_at || null]);
 
     const estado = await isSistemaAbierto();
     io.emit("sistema_cerrado", { hora_apertura: estado.hora_apertura });
