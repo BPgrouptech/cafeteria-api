@@ -1541,6 +1541,10 @@ cron.schedule("* * * * *", async () => {
   const estado = await isSistemaAbierto();
   if (!estado.abierto) {
     console.log("[CRON] Abriendo sistema automáticamente");
+    await pool.query(`
+      UPDATE caja_diaria SET next_opening_at = NOW()
+      WHERE id = (SELECT id FROM caja_diaria ORDER BY cerrado_at DESC LIMIT 1)
+    `);
     io.emit("sistema_abierto", {});
   }
 });
