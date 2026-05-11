@@ -2,7 +2,6 @@ require("dotenv").config();
 
 const http = require("http");
 const { Server } = require("socket.io");
-const cron = require("node-cron");
 
 const express = require("express");
 const cors = require("cors");
@@ -100,34 +99,7 @@ function auth(requiredRoles = []) {
 }
 
 async function isSistemaAbierto() {
-  try {
-    const cerradoResult = await pool.query(`
-      SELECT cerrado_at, next_opening_at FROM caja_diaria
-      WHERE caja_chica_cierre IS NOT NULL
-      ORDER BY cerrado_at DESC
-      LIMIT 1
-    `);
-
-    if (cerradoResult.rows.length === 0) {
-      return { abierto: true };
-    }
-
-    const row = cerradoResult.rows[0];
-    const now = new Date();
-
-    if (row.next_opening_at) {
-      return { abierto: now >= new Date(row.next_opening_at) };
-    }
-
-    const cerradoAt = new Date(row.cerrado_at);
-    if (now - cerradoAt > 24 * 60 * 60 * 1000) {
-      return { abierto: true };
-    }
-
-    return { abierto: false };
-  } catch {
-    return { abierto: true };
-  }
+  return { abierto: true };
 }
 
 async function verificarSistemaAbierto(req, res, next) {
@@ -1448,19 +1420,15 @@ app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
     }
 
     const result = await pool.query(`
-      INSERT INTO caja_diaria (fecha, caja_chica_apertura, caja_chica_cierre, cerrado_por, cerrado_at, notas, next_opening_at)
-      VALUES (CURRENT_DATE, 0, $1, $2, NOW(), $3, $4)
+      INSERT INTO caja_diaria (fecha, caja_chica_apertura, caja_chica_cierre, cerrado_por, cerrado_at, notas)
+      VALUES (CURRENT_DATE, 0, $1, $2, NOW(), $3)
       ON CONFLICT (fecha) DO UPDATE
         SET caja_chica_cierre = $1,
             cerrado_por = $2,
             cerrado_at = NOW(),
-            notas = COALESCE($3, caja_diaria.notas),
-            next_opening_at = $4
+            notas = COALESCE($3, caja_diaria.notas)
       RETURNING *
-    `, [monto, req.user.id, notas || null, next_opening_at || null]);
-
-    const estado = await isSistemaAbierto();
-    io.emit("sistema_cerrado", { hora_apertura: estado.hora_apertura });
+    `, [monto, req.user.id, notas || null]);
 
     res.json({
       ok: true,
@@ -1508,14 +1476,3 @@ server.listen(PORT, () => {
   console.log(`API Cafetería corriendo en puerto ${PORT}`);
 });
 
-cron.schedule("* * * * *", async () => {
-  const estado = await isSistemaAbierto();
-  if (!estado.abierto) {
-    console.log("[CRON] Abriendo sistema automáticamente");
-    await pool.query(`
-      UPDATE caja_diaria SET next_opening_at = NOW()
-      WHERE id = (SELECT id FROM caja_diaria ORDER BY cerrado_at DESC LIMIT 1)
-    `);
-    io.emit("sistema_abierto", {});
-  }
-});
