@@ -116,11 +116,6 @@ async function isSistemaAbierto() {
     const now = new Date();
 
     if (row.next_opening_at) {
-      // En DEV_MODE: si está en horario de negocio (7am-11pm) se considera abierto
-      if (process.env.DEV_MODE === "true") {
-        const hora = now.getHours();
-        return { abierto: hora >= 7 && hora < 23 };
-      }
       return { abierto: now >= new Date(row.next_opening_at) };
     }
 
@@ -1428,16 +1423,9 @@ app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
   try {
     const { caja_chica, notas, password } = req.body;
 
-    // Calcular próxima apertura automáticamente: siguiente día válido a las 7am
-    const DEV_MODE_CIERRE = process.env.DEV_MODE === "true";
     const nextOpen = new Date();
     nextOpen.setDate(nextOpen.getDate() + 1);
     nextOpen.setHours(7, 0, 0, 0);
-    if (!DEV_MODE_CIERRE) {
-      while (![0, 3, 4, 5, 6].includes(nextOpen.getDay())) {
-        nextOpen.setDate(nextOpen.getDate() + 1);
-      }
-    }
     const next_opening_at = nextOpen.toISOString();
 
     if (caja_chica === undefined || caja_chica === null) {
@@ -1520,20 +1508,7 @@ server.listen(PORT, () => {
   console.log(`API Cafetería corriendo en puerto ${PORT}`);
 });
 
-const DEV_MODE = process.env.DEV_MODE === "true";
-// Días válidos: miércoles(3), jueves(4), viernes(5), sábado(6), domingo(0)
-const DIAS_ABIERTO = [0, 3, 4, 5, 6];
-
 cron.schedule("* * * * *", async () => {
-  const now = new Date();
-  const hora = now.getHours();
-  const dia = now.getDay();
-
-  const diaValido = DEV_MODE || DIAS_ABIERTO.includes(dia);
-  const horaValida = hora >= 7 && hora < 23;
-
-  if (!diaValido || !horaValida) return;
-
   const estado = await isSistemaAbierto();
   if (!estado.abierto) {
     console.log("[CRON] Abriendo sistema automáticamente");
