@@ -1164,6 +1164,19 @@ app.get("/ventas/resumen", auth(["admin"]), async (req, res) => {
   }
 });
 
+app.get("/fix-session-start", async (req, res) => {
+  try {
+    await pool.query(`
+      ALTER TABLE caja_diaria ADD COLUMN IF NOT EXISTS session_start_at TIMESTAMP;
+      UPDATE caja_diaria SET session_start_at = created_at WHERE session_start_at IS NULL;
+    `);
+    res.json({ ok: true, message: "Columna session_start_at agregada" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error agregando columna" });
+  }
+});
+
 app.get("/fix-next-opening", async (req, res) => {
   try {
     await pool.query(`
@@ -1249,6 +1262,60 @@ app.get("/fix-caja-chica", async (req, res) => {
 
 app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
   try {
+    // 1. Obtener o crear el registro de caja del día
+    let cajaResult = await pool.query(
+      "SELECT * FROM caja_diaria WHERE fecha = CURRENT_DATE"
+    );
+
+    let caja;
+    if (cajaResult.rows.length === 0) {
+      const anteriorResult = await pool.query(`
+        SELECT COALESCE(
+          (SELECT caja_chica_cierre FROM caja_diaria
+           WHERE caja_chica_cierre IS NOT NULL
+           ORDER BY cerrado_at DESC LIMIT 1),
+          (SELECT caja_chica_apertura FROM caja_diaria
+           WHERE fecha < CURRENT_DATE
+           ORDER BY fecha DESC LIMIT 1),
+          0
+        ) AS apertura_valor
+      `);
+      const apertura = Number(anteriorResult.rows[0]?.apertura_valor || 0);
+
+      const insertResult = await pool.query(`
+        INSERT INTO caja_diaria (fecha, caja_chica_apertura, session_start_at)
+        VALUES (CURRENT_DATE, $1, NOW())
+        RETURNING *
+      `, [apertura]);
+      caja = insertResult.rows[0];
+    } else if (cajaResult.rows[0].caja_chica_cierre !== null) {
+      const estadoActual = await isSistemaAbierto();
+      if (estadoActual.abierto) {
+        // Mismo día, nuevo ciclo: llevar caja chica y registrar inicio de sesión
+        const apertura = Number(cajaResult.rows[0].caja_chica_cierre);
+        const sessionStart = cajaResult.rows[0].next_opening_at || new Date();
+        const resetResult = await pool.query(`
+          UPDATE caja_diaria
+          SET caja_chica_apertura = $1,
+              caja_chica_cierre = NULL,
+              cerrado_por = NULL,
+              cerrado_at = NULL,
+              notas = NULL,
+              next_opening_at = NULL,
+              session_start_at = $2
+          WHERE fecha = CURRENT_DATE
+          RETURNING *
+        `, [apertura, sessionStart]);
+        caja = resetResult.rows[0];
+      } else {
+        caja = cajaResult.rows[0];
+      }
+    } else {
+      caja = cajaResult.rows[0];
+    }
+
+    // 2. Ventas solo desde el inicio de la sesión actual
+    const sessionStart = caja.session_start_at || caja.created_at;
     const ventasResult = await pool.query(`
       SELECT
         COUNT(*) AS total_ordenes,
@@ -1257,57 +1324,8 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
         COALESCE(SUM(CASE WHEN payment_method = 'tarjeta' THEN total ELSE 0 END), 0) AS ventas_tarjeta
       FROM orders
       WHERE status = 'pagado'
-        AND DATE(paid_at) = CURRENT_DATE
-    `);
-
-    let cajaResult = await pool.query(
-      "SELECT * FROM caja_diaria WHERE fecha = CURRENT_DATE"
-    );
-
-    let caja;
-    if (cajaResult.rows.length === 0) {
-      const anteriorResult = await pool.query(`
-        SELECT caja_chica_cierre
-        FROM caja_diaria
-        WHERE caja_chica_cierre IS NOT NULL
-        ORDER BY cerrado_at DESC
-        LIMIT 1
-      `);
-
-      const apertura = anteriorResult.rows.length > 0
-        ? Number(anteriorResult.rows[0].caja_chica_cierre)
-        : 0;
-
-      const insertResult = await pool.query(`
-        INSERT INTO caja_diaria (fecha, caja_chica_apertura)
-        VALUES (CURRENT_DATE, $1)
-        RETURNING *
-      `, [apertura]);
-
-      caja = insertResult.rows[0];
-    } else if (cajaResult.rows[0].caja_chica_cierre !== null) {
-      // Registro de hoy existe pero está cerrado — verificar si el sistema ya reabrió
-      const estadoActual = await isSistemaAbierto();
-      if (estadoActual.abierto) {
-        // Nuevo ciclo del mismo día: llevar la caja chica como nueva apertura
-        const apertura = Number(cajaResult.rows[0].caja_chica_cierre);
-        const resetResult = await pool.query(`
-          UPDATE caja_diaria
-          SET caja_chica_apertura = $1,
-              caja_chica_cierre = NULL,
-              cerrado_por = NULL,
-              cerrado_at = NULL,
-              notas = NULL
-          WHERE fecha = CURRENT_DATE
-          RETURNING *
-        `, [apertura]);
-        caja = resetResult.rows[0];
-      } else {
-        caja = cajaResult.rows[0];
-      }
-    } else {
-      caja = cajaResult.rows[0];
-    }
+        AND paid_at >= $1
+    `, [sessionStart]);
 
     const ventas = ventasResult.rows[0];
     const ventasEfectivo = Number(ventas.ventas_efectivo);
