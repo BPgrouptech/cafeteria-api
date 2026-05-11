@@ -101,11 +101,6 @@ function auth(requiredRoles = []) {
 
 async function isSistemaAbierto() {
   try {
-    const configResult = await pool.query(
-      "SELECT valor FROM configuracion WHERE clave = 'hora_apertura'"
-    );
-    const horaApertura = configResult.rows.length > 0 ? configResult.rows[0].valor : "07:00";
-
     const cerradoResult = await pool.query(`
       SELECT cerrado_at, next_opening_at FROM caja_diaria
       WHERE caja_chica_cierre IS NOT NULL
@@ -114,28 +109,29 @@ async function isSistemaAbierto() {
     `);
 
     if (cerradoResult.rows.length === 0) {
-      return { abierto: true, hora_apertura: horaApertura };
+      return { abierto: true };
     }
 
     const row = cerradoResult.rows[0];
     const now = new Date();
 
     if (row.next_opening_at) {
-      return {
-        abierto: now >= new Date(row.next_opening_at),
-        hora_apertura: horaApertura,
-      };
+      // En DEV_MODE: si está en horario de negocio (7am-11pm) se considera abierto
+      if (process.env.DEV_MODE === "true") {
+        const hora = now.getHours();
+        return { abierto: hora >= 7 && hora < 23 };
+      }
+      return { abierto: now >= new Date(row.next_opening_at) };
     }
 
-    // Fallback si no tiene next_opening_at: cerrado por 24h
     const cerradoAt = new Date(row.cerrado_at);
     if (now - cerradoAt > 24 * 60 * 60 * 1000) {
-      return { abierto: true, hora_apertura: horaApertura };
+      return { abierto: true };
     }
 
-    return { abierto: false, hora_apertura: horaApertura };
+    return { abierto: false };
   } catch {
-    return { abierto: true, hora_apertura: "07:00" };
+    return { abierto: true };
   }
 }
 
