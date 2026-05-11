@@ -239,6 +239,7 @@ app.get("/fix-payment-columns", async (req, res) => {
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS amount_paid NUMERIC(10,2);
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS change_given NUMERIC(10,2);
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method TEXT;
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS pickup_name TEXT;
     `);
 
     res.json({ ok: true, message: "Columnas de pago, cambio y método agregadas" });
@@ -647,7 +648,7 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
   const client = await pool.connect();
 
   try {
-    const { items, table_number } = req.body;
+    const { items, table_number, pickup_name } = req.body;
 
     if (table_number === undefined) {
       return res.status(400).json({ error: "Número de mesa requerido" });
@@ -662,10 +663,10 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
     let total = 0;
 
     const orderResult = await client.query(
-      `INSERT INTO orders (waiter_id, status, total, table_number)
-       VALUES ($1, 'pendiente', 0, $2)
+      `INSERT INTO orders (waiter_id, status, total, table_number, pickup_name)
+       VALUES ($1, 'pendiente', 0, $2, $3)
        RETURNING *`,
-      [req.user.id, table_number != null ? Number(table_number) : null]
+      [req.user.id, table_number != null ? Number(table_number) : null, pickup_name || null]
     );
 
     const order = orderResult.rows[0];
@@ -937,7 +938,7 @@ app.put("/orders/:id", auth(["admin", "mesero"]), verificarSistemaAbierto, async
 
   try {
     const { id } = req.params;
-    const { items, table_number } = req.body;
+    const { items, table_number, pickup_name } = req.body;
 
     if (table_number === undefined) {
       return res.status(400).json({ error: "Número de mesa requerido" });
@@ -1000,12 +1001,13 @@ app.put("/orders/:id", auth(["admin", "mesero"]), verificarSistemaAbierto, async
     }
 
     const updatedOrder = await client.query(
-      `UPDATE orders 
+      `UPDATE orders
        SET total = $1,
-           table_number = $2
-       WHERE id = $3
+           table_number = $2,
+           pickup_name = $3
+       WHERE id = $4
        RETURNING *`,
-      [total, table_number != null ? Number(table_number) : null, id]
+      [total, table_number != null ? Number(table_number) : null, pickup_name || null, id]
     );
 
     await client.query("COMMIT");
