@@ -1395,7 +1395,7 @@ app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
       return res.status(401).json({ error: "Contraseña incorrecta" });
     }
 
-    const result = await pool.query(`
+    await pool.query(`
       INSERT INTO caja_diaria (fecha, caja_chica_apertura, caja_chica_cierre, cerrado_por, cerrado_at, notas)
       VALUES (CURRENT_DATE, 0, $1, $2, NOW(), $3)
       ON CONFLICT (fecha) DO UPDATE
@@ -1403,17 +1403,36 @@ app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
             cerrado_por = $2,
             cerrado_at = NOW(),
             notas = COALESCE($3, caja_diaria.notas)
-      RETURNING *
     `, [monto, req.user.id, notas || null]);
 
-    res.json({
-      ok: true,
-      message: "Caja cerrada correctamente",
-      caja: result.rows[0],
-    });
+    await pool.query(`
+      INSERT INTO caja_cierres (fecha, monto, notas, cerrado_por, cerrado_at)
+      VALUES (CURRENT_DATE, $1, $2, $3, NOW())
+    `, [monto, notas || null, req.user.id]);
+
+    res.json({ ok: true, message: "Caja cerrada correctamente" });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error cerrando caja" });
+  }
+});
+
+app.get("/fix-caja-cierres", async (req, res) => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS caja_cierres (
+        id SERIAL PRIMARY KEY,
+        fecha DATE NOT NULL,
+        monto NUMERIC(10,2) NOT NULL,
+        notas TEXT,
+        cerrado_por INTEGER REFERENCES users(id),
+        cerrado_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    res.json({ ok: true, message: "Tabla caja_cierres creada" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error creando tabla caja_cierres" });
   }
 });
 
@@ -1421,11 +1440,11 @@ app.get("/caja/historial", auth(["admin"]), async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT
-        cd.*,
+        cc.*,
         u.name AS cerrado_por_nombre
-      FROM caja_diaria cd
-      LEFT JOIN users u ON u.id = cd.cerrado_por
-      ORDER BY cd.fecha DESC
+      FROM caja_cierres cc
+      LEFT JOIN users u ON u.id = cc.cerrado_por
+      ORDER BY cc.cerrado_at DESC
       LIMIT 90
     `);
 
