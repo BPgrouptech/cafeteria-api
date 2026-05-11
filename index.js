@@ -1307,14 +1307,12 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
 
     let caja;
     if (cajaResult.rows.length === 0) {
+      // Nuevo día: crear registro con la caja chica del cierre anterior
       const anteriorResult = await pool.query(`
         SELECT COALESCE(
           (SELECT caja_chica_cierre FROM caja_diaria
            WHERE caja_chica_cierre IS NOT NULL
            ORDER BY cerrado_at DESC LIMIT 1),
-          (SELECT caja_chica_apertura FROM caja_diaria
-           WHERE fecha < CURRENT_DATE
-           ORDER BY fecha DESC LIMIT 1),
           0
         ) AS apertura_valor
       `);
@@ -1326,30 +1324,6 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
         RETURNING *
       `, [apertura]);
       caja = insertResult.rows[0];
-    } else if (cajaResult.rows[0].caja_chica_cierre !== null) {
-      const estadoActual = await isSistemaAbierto();
-      if (estadoActual.abierto) {
-        // Mismo día, nuevo ciclo: llevar caja chica y registrar inicio de sesión
-        const apertura = Number(cajaResult.rows[0].caja_chica_cierre);
-        const sessionStart = cajaResult.rows[0].next_opening_at || new Date();
-        const resetResult = await pool.query(`
-          UPDATE caja_diaria
-          SET caja_chica_apertura = $1,
-              caja_chica_cierre = NULL,
-              cerrado_por = NULL,
-              cerrado_at = NULL,
-              notas = NULL,
-              next_opening_at = NULL,
-              session_start_at = $2
-          WHERE fecha = CURRENT_DATE
-          RETURNING *
-        `, [apertura, sessionStart]);
-        caja = resetResult.rows[0];
-        ultimoEstadoSistema = true;
-        io.emit("sistema_abierto", {});
-      } else {
-        caja = cajaResult.rows[0];
-      }
     } else {
       caja = cajaResult.rows[0];
     }
