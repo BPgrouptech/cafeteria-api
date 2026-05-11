@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const http = require("http");
 const { Server } = require("socket.io");
+const cron = require("node-cron");
 
 const express = require("express");
 const cors = require("cors");
@@ -1429,7 +1430,19 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
 
 app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
   try {
-    const { caja_chica, notas, password, next_opening_at } = req.body;
+    const { caja_chica, notas, password } = req.body;
+
+    // Calcular próxima apertura automáticamente: siguiente día válido a las 7am
+    const DEV_MODE_CIERRE = process.env.DEV_MODE === "true";
+    const nextOpen = new Date();
+    nextOpen.setDate(nextOpen.getDate() + 1);
+    nextOpen.setHours(7, 0, 0, 0);
+    if (!DEV_MODE_CIERRE) {
+      while (![0, 3, 4, 5, 6].includes(nextOpen.getDay())) {
+        nextOpen.setDate(nextOpen.getDate() + 1);
+      }
+    }
+    const next_opening_at = nextOpen.toISOString();
 
     if (caja_chica === undefined || caja_chica === null) {
       return res.status(400).json({ error: "Monto de caja chica requerido" });
@@ -1509,4 +1522,25 @@ io.on("connection", (socket) => {
 
 server.listen(PORT, () => {
   console.log(`API Cafetería corriendo en puerto ${PORT}`);
+});
+
+const DEV_MODE = process.env.DEV_MODE === "true";
+// Días válidos: miércoles(3), jueves(4), viernes(5), sábado(6), domingo(0)
+const DIAS_ABIERTO = [0, 3, 4, 5, 6];
+
+cron.schedule("* * * * *", async () => {
+  const now = new Date();
+  const hora = now.getHours();
+  const dia = now.getDay();
+
+  const diaValido = DEV_MODE || DIAS_ABIERTO.includes(dia);
+  const horaValida = hora >= 7 && hora < 23;
+
+  if (!diaValido || !horaValida) return;
+
+  const estado = await isSistemaAbierto();
+  if (!estado.abierto) {
+    console.log("[CRON] Abriendo sistema automáticamente");
+    io.emit("sistema_abierto", {});
+  }
 });
