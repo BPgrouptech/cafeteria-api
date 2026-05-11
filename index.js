@@ -1434,7 +1434,7 @@ app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
     nextOpen.setDate(nextOpen.getDate() + 1);
     nextOpen.setHours(7, 0, 0, 0);
     if (!DEV_MODE_CIERRE) {
-      while (![3, 4, 5, 6].includes(nextOpen.getDay())) {
+      while (![0, 3, 4, 5, 6].includes(nextOpen.getDay())) {
         nextOpen.setDate(nextOpen.getDate() + 1);
       }
     }
@@ -1521,8 +1521,8 @@ server.listen(PORT, () => {
 });
 
 const DEV_MODE = process.env.DEV_MODE === "true";
-// Días válidos: miércoles(3), jueves(4), viernes(5), sábado(6) — domingo(0) temporalmente excluido para pruebas
-const DIAS_ABIERTO = [3, 4, 5, 6];
+// Días válidos: miércoles(3), jueves(4), viernes(5), sábado(6), domingo(0)
+const DIAS_ABIERTO = [0, 3, 4, 5, 6];
 
 cron.schedule("* * * * *", async () => {
   const now = new Date();
