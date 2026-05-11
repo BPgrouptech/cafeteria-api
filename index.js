@@ -19,6 +19,8 @@ const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
 const pool = require("./db");
 
+let ultimoEstadoSistema = null; // null = no verificado aún
+
 const app = express();
 
 app.use(cors({ origin: "*" }));
@@ -1211,6 +1213,12 @@ app.get("/fix-configuracion", async (req, res) => {
 app.get("/sistema/estado", auth(["admin", "mesero", "barista", "cajero"]), async (req, res) => {
   try {
     const estado = await isSistemaAbierto();
+
+    if (ultimoEstadoSistema === false && estado.abierto) {
+      io.emit("sistema_abierto", { hora_apertura: estado.hora_apertura });
+    }
+    ultimoEstadoSistema = estado.abierto;
+
     res.json(estado);
   } catch (error) {
     console.error(error);
@@ -1307,6 +1315,8 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
           RETURNING *
         `, [apertura, sessionStart]);
         caja = resetResult.rows[0];
+        ultimoEstadoSistema = true;
+        io.emit("sistema_abierto", {});
       } else {
         caja = cajaResult.rows[0];
       }
