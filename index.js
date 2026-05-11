@@ -685,7 +685,7 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
   try {
     const { items, table_number } = req.body;
 
-    if (!table_number) {
+    if (table_number === undefined) {
       return res.status(400).json({ error: "Número de mesa requerido" });
     }
 
@@ -701,7 +701,7 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
       `INSERT INTO orders (waiter_id, status, total, table_number)
        VALUES ($1, 'pendiente', 0, $2)
        RETURNING *`,
-      [req.user.id, Number(table_number)]
+      [req.user.id, table_number != null ? Number(table_number) : null]
     );
 
     const order = orderResult.rows[0];
@@ -831,6 +831,72 @@ app.get("/orders/open", auth(["admin", "cajero"]), async (req, res) => {
   }
 });
 
+app.put("/orders/pay-table/:tableNumber", auth(["admin", "cajero"]), verificarSistemaAbierto, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { tableNumber } = req.params;
+    const { payment_method, amount_paid } = req.body;
+    const isLlevar = tableNumber === "llevar";
+
+    if (!["efectivo", "tarjeta"].includes(payment_method)) {
+      return res.status(400).json({ error: "Método de pago inválido" });
+    }
+
+    const ordersResult = await client.query(
+      isLlevar
+        ? "SELECT * FROM orders WHERE table_number IS NULL AND status IN ('pendiente', 'completado')"
+        : "SELECT * FROM orders WHERE table_number = $1 AND status IN ('pendiente', 'completado')",
+      isLlevar ? [] : [tableNumber]
+    );
+
+    if (ordersResult.rows.length === 0) {
+      return res.status(404).json({ error: "No hay órdenes abiertas para esta mesa" });
+    }
+
+    const total = ordersResult.rows.reduce((sum, o) => sum + Number(o.total), 0);
+
+    let paid = total;
+    let change = 0;
+
+    if (payment_method === "efectivo") {
+      paid = Number(amount_paid);
+      if (isNaN(paid) || paid < total) {
+        return res.status(400).json({
+          error: "Monto insuficiente",
+          total,
+          faltante: Number((total - paid).toFixed(2)),
+        });
+      }
+      change = Number((paid - total).toFixed(2));
+    }
+
+    await client.query("BEGIN");
+
+    const updatedOrders = [];
+    for (const order of ordersResult.rows) {
+      const result = await client.query(
+        `UPDATE orders
+         SET status = 'pagado', paid_at = NOW(),
+             payment_method = $2, amount_paid = $3, change_given = $4
+         WHERE id = $1 RETURNING *`,
+        [order.id, payment_method, Number(order.total), 0]
+      );
+      updatedOrders.push(result.rows[0]);
+      io.emit("order_paid", result.rows[0]);
+    }
+
+    await client.query("COMMIT");
+
+    res.json({ ok: true, total, cambio: change, orders: updatedOrders });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error(error);
+    res.status(500).json({ error: "Error registrando pago" });
+  } finally {
+    client.release();
+  }
+});
+
 app.put("/orders/:id/pay", auth(["admin", "cajero"]), verificarSistemaAbierto, async (req, res) => {
   try {
     const { id } = req.params;
@@ -909,7 +975,7 @@ app.put("/orders/:id", auth(["admin", "mesero"]), verificarSistemaAbierto, async
     const { id } = req.params;
     const { items, table_number } = req.body;
 
-    if (!table_number) {
+    if (table_number === undefined) {
       return res.status(400).json({ error: "Número de mesa requerido" });
     }
 
@@ -920,7 +986,7 @@ app.put("/orders/:id", auth(["admin", "mesero"]), verificarSistemaAbierto, async
     await client.query("BEGIN");
 
     const orderResult = await client.query(
-      `SELECT * FROM orders 
+      `SELECT * FROM orders
        WHERE id = $1 AND status = 'pendiente'`,
       [id]
     );
@@ -975,7 +1041,7 @@ app.put("/orders/:id", auth(["admin", "mesero"]), verificarSistemaAbierto, async
            table_number = $2
        WHERE id = $3
        RETURNING *`,
-      [total, Number(table_number), id]
+      [total, table_number != null ? Number(table_number) : null, id]
     );
 
     await client.query("COMMIT");
