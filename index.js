@@ -875,20 +875,6 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
       [total, order.id]
     );
 
-    // Descontar ingredientes según receta de cada producto
-    for (const item of items) {
-      const recipe = await client.query(
-        "SELECT * FROM product_ingredients WHERE product_id = $1",
-        [item.product_id]
-      );
-      for (const ri of recipe.rows) {
-        await client.query(
-          "UPDATE ingredients SET stock = GREATEST(0, stock - $1) WHERE id = $2",
-          [ri.quantity * Number(item.quantity || 1), ri.ingredient_id]
-        );
-      }
-    }
-
     await client.query("COMMIT");
 
     io.emit("new_order", finalOrder.rows[0]);
@@ -1205,24 +1191,46 @@ app.put("/orders/:id", auth(["admin", "mesero"]), verificarSistemaAbierto, async
 });
 
 app.put("/orders/:id/complete", auth(["admin", "barista"]), verificarSistemaAbierto, async (req, res) => {
+  const client = await pool.connect();
   try {
     const { id } = req.params;
 
-    const result = await pool.query(
-      `UPDATE orders
-       SET status = 'completado',
-           completed_at = NOW()
-       WHERE id = $1
-       RETURNING *`,
+    await client.query("BEGIN");
+
+    const result = await client.query(
+      `UPDATE orders SET status = 'completado', completed_at = NOW() WHERE id = $1 RETURNING *`,
       [id]
     );
+
+    // Descontar ingredientes según receta de cada producto de la orden
+    const items = await client.query(
+      "SELECT product_id, quantity FROM order_items WHERE order_id = $1",
+      [id]
+    );
+    for (const item of items.rows) {
+      const recipe = await client.query(
+        "SELECT * FROM product_ingredients WHERE product_id = $1",
+        [item.product_id]
+      );
+      for (const ri of recipe.rows) {
+        await client.query(
+          "UPDATE ingredients SET stock = GREATEST(0, stock - $1) WHERE id = $2",
+          [ri.quantity * Number(item.quantity), ri.ingredient_id]
+        );
+      }
+    }
+
+    await client.query("COMMIT");
 
     io.emit("order_completed", result.rows[0]);
 
     res.json(result.rows[0]);
   } catch (error) {
+    await client.query("ROLLBACK");
     console.error(error);
     res.status(500).json({ error: "Error completando orden" });
+  } finally {
+    client.release();
   }
 });
 
