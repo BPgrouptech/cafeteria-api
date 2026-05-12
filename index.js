@@ -1046,6 +1046,36 @@ app.put("/orders/:id/complete", auth(["admin", "barista"]), verificarSistemaAbie
   }
 });
 
+app.put("/orders/:id/reopen", auth(["admin", "cajero"]), verificarSistemaAbierto, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const current = await pool.query("SELECT status FROM orders WHERE id = $1", [id]);
+    if (current.rows.length === 0) {
+      return res.status(404).json({ error: "Orden no encontrada" });
+    }
+    if (current.rows[0].status !== "completado") {
+      return res.status(400).json({ error: "Solo se pueden reabrir órdenes con estado 'completado'" });
+    }
+
+    const result = await pool.query(
+      `UPDATE orders
+       SET status = 'pendiente',
+           completed_at = NULL
+       WHERE id = $1
+       RETURNING *`,
+      [id]
+    );
+
+    io.emit("order_reopened", result.rows[0]);
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error reabriendo orden" });
+  }
+});
+
 app.delete("/orders/:id", auth(["admin"]), async (req, res) => {
   try {
     const { id } = req.params;
