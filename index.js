@@ -301,6 +301,19 @@ app.get("/fix-inventory", async (req, res) => {
   }
 });
 
+app.get("/fix-ingredients-unique", async (req, res) => {
+  try {
+    await pool.query(`
+      ALTER TABLE ingredients ADD CONSTRAINT ingredients_name_unique UNIQUE (name);
+    `);
+    res.json({ ok: true, message: "Constraint único en nombre de ingrediente agregado" });
+  } catch (error) {
+    if (error.code === "42P07") return res.json({ ok: true, message: "El constraint ya existía" });
+    console.error(error);
+    res.status(500).json({ error: "Error agregando constraint" });
+  }
+});
+
 // ─── Ingredientes ────────────────────────────────────────────────────────────
 
 app.get("/ingredients", auth(["admin"]), async (req, res) => {
@@ -326,6 +339,9 @@ app.post("/ingredients", auth(["admin"]), async (req, res) => {
     );
     res.json(result.rows[0]);
   } catch (error) {
+    if (error.code === "23505") {
+      return res.status(400).json({ error: `Ya existe un ingrediente llamado "${req.body.name}"` });
+    }
     console.error(error);
     res.status(500).json({ error: "Error creando ingrediente" });
   }
