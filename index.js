@@ -274,6 +274,172 @@ app.get("/reset-sistema", async (req, res) => {
   }
 });
 
+app.get("/fix-inventory", async (req, res) => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS ingredients (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        unit TEXT NOT NULL DEFAULT 'pza',
+        stock NUMERIC(10,3) NOT NULL DEFAULT 0,
+        min_stock NUMERIC(10,3) NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS product_ingredients (
+        id SERIAL PRIMARY KEY,
+        product_id INTEGER REFERENCES products(id) ON DELETE CASCADE,
+        ingredient_id INTEGER REFERENCES ingredients(id) ON DELETE CASCADE,
+        quantity NUMERIC(10,3) NOT NULL DEFAULT 0,
+        UNIQUE(product_id, ingredient_id)
+      );
+    `);
+    res.json({ ok: true, message: "Tablas de inventario creadas" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error creando tablas de inventario" });
+  }
+});
+
+// ─── Ingredientes ────────────────────────────────────────────────────────────
+
+app.get("/ingredients", auth(["admin"]), async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM ingredients ORDER BY name ASC"
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error obteniendo ingredientes" });
+  }
+});
+
+app.post("/ingredients", auth(["admin"]), async (req, res) => {
+  try {
+    const { name, unit, stock, min_stock } = req.body;
+    if (!name || !unit) return res.status(400).json({ error: "Nombre y unidad requeridos" });
+    const result = await pool.query(
+      `INSERT INTO ingredients (name, unit, stock, min_stock)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [name, unit, Number(stock) || 0, Number(min_stock) || 0]
+    );
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error creando ingrediente" });
+  }
+});
+
+app.put("/ingredients/:id", auth(["admin"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, unit, min_stock } = req.body;
+    const result = await pool.query(
+      `UPDATE ingredients SET name = $1, unit = $2, min_stock = $3 WHERE id = $4 RETURNING *`,
+      [name, unit, Number(min_stock) || 0, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: "Ingrediente no encontrado" });
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error actualizando ingrediente" });
+  }
+});
+
+app.delete("/ingredients/:id", auth(["admin"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query("DELETE FROM ingredients WHERE id = $1", [id]);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error eliminando ingrediente" });
+  }
+});
+
+app.put("/ingredients/:id/stock", auth(["admin"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { cantidad } = req.body; // positivo = agregar, negativo = restar
+    if (cantidad === undefined) return res.status(400).json({ error: "Cantidad requerida" });
+    const result = await pool.query(
+      `UPDATE ingredients SET stock = GREATEST(0, stock + $1) WHERE id = $2 RETURNING *`,
+      [Number(cantidad), id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: "Ingrediente no encontrado" });
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error ajustando stock" });
+  }
+});
+
+// ─── Recetas ─────────────────────────────────────────────────────────────────
+
+app.get("/products/:id/recipe", auth(["admin"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `SELECT pi.id, pi.ingredient_id, pi.quantity, i.name, i.unit
+       FROM product_ingredients pi
+       JOIN ingredients i ON i.id = pi.ingredient_id
+       WHERE pi.product_id = $1
+       ORDER BY i.name ASC`,
+      [id]
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error obteniendo receta" });
+  }
+});
+
+app.post("/products/:id/recipe", auth(["admin"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { ingredient_id, quantity } = req.body;
+    if (!ingredient_id || !quantity) return res.status(400).json({ error: "ingredient_id y quantity requeridos" });
+    const result = await pool.query(
+      `INSERT INTO product_ingredients (product_id, ingredient_id, quantity)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (product_id, ingredient_id) DO UPDATE SET quantity = $3
+       RETURNING *`,
+      [id, ingredient_id, Number(quantity)]
+    );
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error guardando receta" });
+  }
+});
+
+app.delete("/products/:id/recipe/:ingredientId", auth(["admin"]), async (req, res) => {
+  try {
+    const { id, ingredientId } = req.params;
+    await pool.query(
+      "DELETE FROM product_ingredients WHERE product_id = $1 AND ingredient_id = $2",
+      [id, ingredientId]
+    );
+    res.json({ ok: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error eliminando ingrediente de receta" });
+  }
+});
+
+app.get("/inventory/alerts", auth(["admin"]), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM ingredients WHERE stock <= min_stock ORDER BY (stock / NULLIF(min_stock, 0)) ASC`
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error obteniendo alertas" });
+  }
+});
+
 app.post("/create-admin", async (req, res) => {
   try {
     const { name, username, password } = req.body;
@@ -708,6 +874,20 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
       "UPDATE orders SET total = $1 WHERE id = $2 RETURNING *",
       [total, order.id]
     );
+
+    // Descontar ingredientes según receta de cada producto
+    for (const item of items) {
+      const recipe = await client.query(
+        "SELECT * FROM product_ingredients WHERE product_id = $1",
+        [item.product_id]
+      );
+      for (const ri of recipe.rows) {
+        await client.query(
+          "UPDATE ingredients SET stock = GREATEST(0, stock - $1) WHERE id = $2",
+          [ri.quantity * Number(item.quantity || 1), ri.ingredient_id]
+        );
+      }
+    }
 
     await client.query("COMMIT");
 
