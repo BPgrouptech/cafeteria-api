@@ -555,6 +555,50 @@ app.post("/users", auth(["admin"]), async (req, res) => {
   }
 });
 
+app.get("/users", auth(["admin"]), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, name, username, role FROM users WHERE role != 'admin' ORDER BY name ASC`
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error obteniendo usuarios" });
+  }
+});
+
+app.delete("/users/:id", auth(["admin"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { password } = req.body;
+
+    if (!password) {
+      return res.status(400).json({ error: "Contraseña requerida" });
+    }
+
+    const adminResult = await pool.query("SELECT * FROM users WHERE id = $1", [req.user.id]);
+    const valid = await bcrypt.compare(password, adminResult.rows[0].password_hash);
+
+    if (!valid) {
+      return res.status(401).json({ error: "Contraseña incorrecta" });
+    }
+
+    const target = await pool.query("SELECT role FROM users WHERE id = $1", [id]);
+    if (target.rows.length === 0) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+    if (target.rows[0].role === "admin") {
+      return res.status(403).json({ error: "No puedes eliminar a un admin" });
+    }
+
+    await pool.query("DELETE FROM users WHERE id = $1", [id]);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error eliminando usuario" });
+  }
+});
+
 app.get("/products", auth(["admin", "mesero", "barista", "cajero"]), async (req, res) => {
   try {
     const result = await pool.query(`
