@@ -314,6 +314,25 @@ app.get("/fix-ingredients-unique", async (req, res) => {
   }
 });
 
+app.get("/fix-extras", async (req, res) => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS extras (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        price NUMERIC(10,2) NOT NULL DEFAULT 0,
+        active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+      ALTER TABLE order_items ADD COLUMN IF NOT EXISTS extra_id INTEGER REFERENCES extras(id);
+    `);
+    res.json({ ok: true, message: "Tabla extras y columna extra_id en order_items creadas" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error creando tabla extras" });
+  }
+});
+
 // ─── Ingredientes ────────────────────────────────────────────────────────────
 
 app.get("/ingredients", auth(["admin"]), async (req, res) => {
@@ -870,18 +889,92 @@ app.post("/seed-menu-maranba", auth(["admin"]), async (req, res) => {
   }
 });
 
+// ─── Extras ──────────────────────────────────────────────────────────────────
+
+app.get("/extras", auth(["admin", "mesero", "barista", "cajero"]), async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM extras WHERE active = TRUE ORDER BY name ASC"
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error obteniendo extras" });
+  }
+});
+
+app.post("/extras", auth(["admin"]), async (req, res) => {
+  try {
+    const { name, price } = req.body;
+    if (!name || price === undefined || price === null) {
+      return res.status(400).json({ error: "Nombre y precio requeridos" });
+    }
+    const result = await pool.query(
+      "INSERT INTO extras (name, price) VALUES ($1, $2) RETURNING *",
+      [name.trim(), Number(price)]
+    );
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error creando extra" });
+  }
+});
+
+app.put("/extras/:id", auth(["admin"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, price } = req.body;
+    if (!name || price === undefined || price === null) {
+      return res.status(400).json({ error: "Nombre y precio requeridos" });
+    }
+    const result = await pool.query(
+      "UPDATE extras SET name = $1, price = $2 WHERE id = $3 RETURNING *",
+      [name.trim(), Number(price), id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Extra no encontrado" });
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error actualizando extra" });
+  }
+});
+
+app.delete("/extras/:id", auth(["admin"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      "UPDATE extras SET active = FALSE WHERE id = $1 RETURNING id",
+      [id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Extra no encontrado" });
+    }
+    res.json({ ok: true, message: "Extra desactivado" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error eliminando extra" });
+  }
+});
+
+// ─── Órdenes ─────────────────────────────────────────────────────────────────
+
 app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (req, res) => {
   const client = await pool.connect();
 
   try {
-    const { items, table_number, pickup_name } = req.body;
+    const { items, extras: orderExtras, table_number, pickup_name } = req.body;
 
     if (table_number === undefined) {
       return res.status(400).json({ error: "Número de mesa requerido" });
     }
 
-    if (!items || items.length === 0) {
-      return res.status(400).json({ error: "La orden no tiene productos" });
+    const hasItems = items && items.length > 0;
+    const hasExtras = orderExtras && orderExtras.length > 0;
+
+    if (!hasItems && !hasExtras) {
+      return res.status(400).json({ error: "La orden no tiene productos ni extras" });
     }
 
     await client.query("BEGIN");
@@ -897,7 +990,7 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
 
     const order = orderResult.rows[0];
 
-    for (const item of items) {
+    for (const item of (items || [])) {
       const productResult = await client.query(
         "SELECT * FROM products WHERE id = $1 AND active = TRUE",
         [item.product_id]
@@ -910,12 +1003,11 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
       const product = productResult.rows[0];
       const quantity = Number(item.quantity || 1);
       const unitPrice = Number(product.price);
-      const lineTotal = quantity * unitPrice;
 
-      total += lineTotal;
+      total += quantity * unitPrice;
 
       await client.query(
-        `INSERT INTO order_items 
+        `INSERT INTO order_items
          (order_id, product_id, product_name, quantity, unit_price, notes, options_json)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [
@@ -927,6 +1019,30 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
           item.notes || "",
           JSON.stringify(item.options || {}),
         ]
+      );
+    }
+
+    for (const extra of (orderExtras || [])) {
+      const extraResult = await client.query(
+        "SELECT * FROM extras WHERE id = $1 AND active = TRUE",
+        [extra.extra_id]
+      );
+
+      if (extraResult.rows.length === 0) {
+        throw new Error("Extra no encontrado");
+      }
+
+      const extraData = extraResult.rows[0];
+      const quantity = Number(extra.quantity || 1);
+      const unitPrice = Number(extraData.price);
+
+      total += quantity * unitPrice;
+
+      await client.query(
+        `INSERT INTO order_items
+         (order_id, extra_id, product_name, quantity, unit_price, notes, options_json)
+         VALUES ($1, $2, $3, $4, $5, $6, '{}')`,
+        [order.id, extraData.id, extraData.name, quantity, unitPrice, extra.notes || ""]
       );
     }
 
@@ -963,6 +1079,7 @@ app.get(
             json_build_object(
               'id', oi.id,
               'product_id', oi.product_id,
+              'extra_id', oi.extra_id,
               'product_name', oi.product_name,
               'quantity', oi.quantity,
               'unit_price', oi.unit_price,
@@ -998,6 +1115,8 @@ app.get("/orders/open", auth(["admin", "cajero"]), async (req, res) => {
           json_agg(
             json_build_object(
               'id', oi.id,
+              'product_id', oi.product_id,
+              'extra_id', oi.extra_id,
               'product_name', oi.product_name,
               'quantity', oi.quantity,
               'unit_price', oi.unit_price,
@@ -1164,14 +1283,17 @@ app.put("/orders/:id", auth(["admin", "mesero"]), verificarSistemaAbierto, async
 
   try {
     const { id } = req.params;
-    const { items, table_number, pickup_name } = req.body;
+    const { items, extras: orderExtras, table_number, pickup_name } = req.body;
 
     if (table_number === undefined) {
       return res.status(400).json({ error: "Número de mesa requerido" });
     }
 
-    if (!items || items.length === 0) {
-      return res.status(400).json({ error: "La orden no tiene productos" });
+    const hasItems = items && items.length > 0;
+    const hasExtras = orderExtras && orderExtras.length > 0;
+
+    if (!hasItems && !hasExtras) {
+      return res.status(400).json({ error: "La orden no tiene productos ni extras" });
     }
 
     await client.query("BEGIN");
@@ -1193,7 +1315,7 @@ app.put("/orders/:id", auth(["admin", "mesero"]), verificarSistemaAbierto, async
 
     let total = 0;
 
-    for (const item of items) {
+    for (const item of (items || [])) {
       const productResult = await client.query(
         "SELECT * FROM products WHERE id = $1 AND active = TRUE",
         [item.product_id]
@@ -1206,12 +1328,11 @@ app.put("/orders/:id", auth(["admin", "mesero"]), verificarSistemaAbierto, async
       const product = productResult.rows[0];
       const quantity = Number(item.quantity || 1);
       const unitPrice = Number(product.price);
-      const lineTotal = quantity * unitPrice;
 
-      total += lineTotal;
+      total += quantity * unitPrice;
 
       await client.query(
-        `INSERT INTO order_items 
+        `INSERT INTO order_items
          (order_id, product_id, product_name, quantity, unit_price, notes, options_json)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [
@@ -1223,6 +1344,30 @@ app.put("/orders/:id", auth(["admin", "mesero"]), verificarSistemaAbierto, async
           item.notes || "",
           JSON.stringify(item.options || {}),
         ]
+      );
+    }
+
+    for (const extra of (orderExtras || [])) {
+      const extraResult = await client.query(
+        "SELECT * FROM extras WHERE id = $1 AND active = TRUE",
+        [extra.extra_id]
+      );
+
+      if (extraResult.rows.length === 0) {
+        throw new Error("Extra no encontrado");
+      }
+
+      const extraData = extraResult.rows[0];
+      const quantity = Number(extra.quantity || 1);
+      const unitPrice = Number(extraData.price);
+
+      total += quantity * unitPrice;
+
+      await client.query(
+        `INSERT INTO order_items
+         (order_id, extra_id, product_name, quantity, unit_price, notes, options_json)
+         VALUES ($1, $2, $3, $4, $5, $6, '{}')`,
+        [id, extraData.id, extraData.name, quantity, unitPrice, extra.notes || ""]
       );
     }
 
@@ -1401,6 +1546,8 @@ app.get("/orders/history", auth(["admin"]), async (req, res) => {
         COALESCE(
           json_agg(
             json_build_object(
+              'product_id', oi.product_id,
+              'extra_id', oi.extra_id,
               'product_name', oi.product_name,
               'quantity', oi.quantity,
               'unit_price', oi.unit_price,
@@ -1794,8 +1941,9 @@ app.get("/orders/:id/ticket", async (req, res) => {
         : "";
       const nota = item.notes ? `<br><span class="sub">Nota: ${item.notes}</span>` : "";
       const optsHtml = opts ? `<br><span class="sub">${opts}</span>` : "";
+      const extraLabel = item.extra_id ? `<span class="sub"> [Extra]</span>` : "";
       return `<tr>
-        <td>${item.quantity}x ${item.product_name}${optsHtml}${nota}</td>
+        <td>${item.quantity}x ${item.product_name}${extraLabel}${optsHtml}${nota}</td>
         <td class="r">$${subtotal}</td>
       </tr>`;
     }).join("");
