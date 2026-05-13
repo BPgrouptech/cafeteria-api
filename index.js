@@ -1689,6 +1689,159 @@ app.get("/caja/historial", auth(["admin"]), async (req, res) => {
   }
 });
 
+app.get("/orders/:id/ticket", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const tokenParam = req.query.token;
+    const headerToken = (req.headers.authorization || "").replace("Bearer ", "");
+    const token = tokenParam || headerToken;
+
+    if (!token) return res.status(401).send("Token requerido");
+
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch {
+      return res.status(401).send("Token inválido");
+    }
+
+    if (!["admin", "cajero"].includes(decoded.role)) {
+      return res.status(403).send("No autorizado");
+    }
+
+    const orderResult = await pool.query(
+      `SELECT o.*, u.name AS waiter_name
+       FROM orders o
+       LEFT JOIN users u ON u.id = o.waiter_id
+       WHERE o.id = $1`,
+      [id]
+    );
+
+    if (orderResult.rows.length === 0) {
+      return res.status(404).send("Orden no encontrada");
+    }
+
+    const order = orderResult.rows[0];
+
+    const itemsResult = await pool.query(
+      "SELECT * FROM order_items WHERE order_id = $1 ORDER BY id ASC",
+      [id]
+    );
+
+    const items = itemsResult.rows;
+    const fecha = new Date(order.paid_at || order.created_at);
+    const fechaStr = fecha.toLocaleDateString("es-MX", {
+      day: "2-digit", month: "2-digit", year: "numeric",
+    });
+    const horaStr = fecha.toLocaleTimeString("es-MX", {
+      hour: "2-digit", minute: "2-digit",
+    });
+
+    const mesa = order.table_number
+      ? `Mesa ${order.table_number}`
+      : order.pickup_name || "Para llevar";
+
+    const itemsHtml = items.map((item) => {
+      const subtotal = (Number(item.quantity) * Number(item.unit_price)).toFixed(2);
+      const opts = item.options_json
+        ? Object.entries(item.options_json)
+            .filter(([, v]) => v)
+            .map(([k, v]) => `${k}: ${v}`)
+            .join(", ")
+        : "";
+      const nota = item.notes ? `<br><span class="sub">Nota: ${item.notes}</span>` : "";
+      const optsHtml = opts ? `<br><span class="sub">${opts}</span>` : "";
+      return `<tr>
+        <td>${item.quantity}x ${item.product_name}${optsHtml}${nota}</td>
+        <td class="r">$${subtotal}</td>
+      </tr>`;
+    }).join("");
+
+    const total = Number(order.total).toFixed(2);
+    const metodo = order.payment_method === "efectivo" ? "Efectivo" : "Tarjeta";
+
+    let pagoHtml = `<tr><td>Pago con</td><td class="r">${metodo}</td></tr>`;
+    if (order.payment_method === "efectivo" && Number(order.amount_paid) > 0) {
+      pagoHtml += `<tr><td>Recibido</td><td class="r">$${Number(order.amount_paid).toFixed(2)}</td></tr>`;
+      pagoHtml += `<tr class="cambio"><td>Cambio</td><td class="r">$${Number(order.change_given || 0).toFixed(2)}</td></tr>`;
+    }
+
+    const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Ticket #${order.id}</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    font-family:'Courier New',Courier,monospace;
+    font-size:12px;
+    width:80mm;
+    padding:3mm 4mm;
+    color:#000;
+  }
+  .c{text-align:center}
+  .r{text-align:right;white-space:nowrap;padding-left:6px}
+  .nombre{font-size:24px;font-weight:bold;letter-spacing:3px}
+  .sub{font-size:10px;color:#444}
+  hr{border:none;border-top:1px dashed #000;margin:5px 0}
+  table{width:100%;border-collapse:collapse}
+  td{padding:2px 0;vertical-align:top}
+  .total-row td{font-size:14px;font-weight:bold;border-top:1px solid #000;padding-top:4px;margin-top:3px}
+  .cambio td{font-weight:bold}
+  .gracias{font-size:11px;margin-top:6px;line-height:1.6}
+  @media print{
+    body{width:80mm}
+    @page{margin:0;size:80mm auto}
+  }
+</style>
+</head>
+<body>
+  <div class="c">
+    <div class="nombre">Maranda</div>
+    <div style="font-size:10px;letter-spacing:1px">CAFETERIA</div>
+  </div>
+
+  <hr>
+
+  <div>Ticket #${order.id}</div>
+  <div>${fechaStr} &nbsp; ${horaStr}</div>
+  <div>${mesa}</div>
+  ${order.waiter_name ? `<div>Atendio: ${order.waiter_name}</div>` : ""}
+
+  <hr>
+
+  <table>${itemsHtml}</table>
+
+  <hr>
+
+  <table>
+    <tr class="total-row">
+      <td>TOTAL</td>
+      <td class="r">$${total}</td>
+    </tr>
+    ${pagoHtml}
+  </table>
+
+  <hr>
+
+  <div class="c gracias">
+    <div>Gracias por tu visita.</div>
+    <div>Te esperamos pronto.</div>
+  </div>
+
+  <script>window.onload=function(){window.print()}</script>
+</body>
+</html>`;
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(html);
+  } catch (error) {
+    console.error(error);
+    res.status(500).send("Error generando ticket");
+  }
+});
+
 const server = http.createServer(app);
 
 const io = new Server(server, {
