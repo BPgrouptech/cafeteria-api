@@ -1705,6 +1705,24 @@ app.get("/ventas/resumen", auth(["admin"]), async (req, res) => {
   }
 });
 
+app.get("/debug-caja", async (req, res) => {
+  try {
+    const caja = await pool.query("SELECT * FROM caja_diaria ORDER BY fecha DESC LIMIT 3");
+    const orders = await pool.query(`
+      SELECT id, status, total, payment_method, paid_at, created_at
+      FROM orders
+      WHERE status = 'pagado'
+      ORDER BY paid_at DESC
+      LIMIT 10
+    `);
+    const now = await pool.query("SELECT NOW() as now, CURRENT_DATE as today");
+    res.json({ caja: caja.rows, recent_paid_orders: orders.rows, server_time: now.rows[0] });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get("/fix-session-start", async (req, res) => {
   try {
     await pool.query(`
@@ -1837,7 +1855,8 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
       caja = cajaResult.rows[0];
     }
 
-    // 2. Ventas del día: desde que abrió la caja (evita problemas de zona horaria UTC vs local)
+    // 2. Ventas del día: desde session_start_at (o medianoche UTC si es NULL)
+    const sessionStart = caja.session_start_at || new Date(new Date().toISOString().substring(0, 10) + 'T00:00:00Z');
     const ventasResult = await pool.query(`
       SELECT
         COUNT(*) AS total_ordenes,
@@ -1847,7 +1866,7 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
       FROM orders
       WHERE status = 'pagado'
         AND paid_at >= $1
-    `, [caja.session_start_at]);
+    `, [sessionStart]);
 
     const ventas = ventasResult.rows[0];
     const ventasEfectivo = Number(ventas.ventas_efectivo);
