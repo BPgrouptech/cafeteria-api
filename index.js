@@ -314,6 +314,18 @@ app.get("/fix-ingredients-unique", async (req, res) => {
   }
 });
 
+app.get("/fix-price-variants", async (req, res) => {
+  try {
+    await pool.query(`
+      ALTER TABLE product_options ADD COLUMN IF NOT EXISTS affects_price BOOLEAN DEFAULT FALSE;
+    `);
+    res.json({ ok: true, message: "Columna affects_price agregada a product_options" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error en migración" });
+  }
+});
+
 app.get("/fix-extras", async (req, res) => {
   try {
     await pool.query(`
@@ -628,6 +640,7 @@ app.get("/products", auth(["admin", "mesero", "barista", "cajero"]), async (req,
             json_build_object(
               'id', po.id,
               'name', po.name,
+              'affects_price', po.affects_price,
               'values', po.values_json
             )
           ) FILTER (WHERE po.id IS NOT NULL),
@@ -761,13 +774,13 @@ app.delete("/products/:id", auth(["admin"]), async (req, res) => {
 app.post("/products/:id/options", auth(["admin"]), async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, values } = req.body;
+    const { name, values, affects_price } = req.body;
 
     const result = await pool.query(
-      `INSERT INTO product_options (product_id, name, values_json)
-       VALUES ($1, $2, $3)
+      `INSERT INTO product_options (product_id, name, values_json, affects_price)
+       VALUES ($1, $2, $3, $4)
        RETURNING *`,
-      [id, name, JSON.stringify(values || [])]
+      [id, name, JSON.stringify(values || []), affects_price || false]
     );
 
     res.json(result.rows[0]);
@@ -1002,7 +1015,23 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
 
       const product = productResult.rows[0];
       const quantity = Number(item.quantity || 1);
-      const unitPrice = Number(product.price);
+      let unitPrice = Number(product.price);
+
+      // Si el item tiene una opción que varía el precio, usar ese precio
+      const priceOptsResult = await client.query(
+        "SELECT * FROM product_options WHERE product_id = $1 AND affects_price = TRUE",
+        [product.id]
+      );
+      for (const opt of priceOptsResult.rows) {
+        const selectedLabel = item.options?.[opt.name];
+        if (selectedLabel && Array.isArray(opt.values_json)) {
+          const variant = opt.values_json.find(v => v.label === selectedLabel);
+          if (variant?.price !== undefined) {
+            unitPrice = Number(variant.price);
+            break;
+          }
+        }
+      }
 
       total += quantity * unitPrice;
 
@@ -1327,7 +1356,22 @@ app.put("/orders/:id", auth(["admin", "mesero"]), verificarSistemaAbierto, async
 
       const product = productResult.rows[0];
       const quantity = Number(item.quantity || 1);
-      const unitPrice = Number(product.price);
+      let unitPrice = Number(product.price);
+
+      const priceOptsResult = await client.query(
+        "SELECT * FROM product_options WHERE product_id = $1 AND affects_price = TRUE",
+        [product.id]
+      );
+      for (const opt of priceOptsResult.rows) {
+        const selectedLabel = item.options?.[opt.name];
+        if (selectedLabel && Array.isArray(opt.values_json)) {
+          const variant = opt.values_json.find(v => v.label === selectedLabel);
+          if (variant?.price !== undefined) {
+            unitPrice = Number(variant.price);
+            break;
+          }
+        }
+      }
 
       total += quantity * unitPrice;
 
