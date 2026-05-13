@@ -1608,8 +1608,7 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
       caja = cajaResult.rows[0];
     }
 
-    // 2. Ventas solo desde el inicio de la sesión actual
-    const sessionStart = caja.session_start_at || caja.created_at;
+    // 2. Ventas del día (todas las órdenes pagadas hoy)
     const ventasResult = await pool.query(`
       SELECT
         COUNT(*) AS total_ordenes,
@@ -1618,8 +1617,8 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
         COALESCE(SUM(CASE WHEN payment_method = 'tarjeta' THEN total ELSE 0 END), 0) AS ventas_tarjeta
       FROM orders
       WHERE status = 'pagado'
-        AND paid_at >= $1
-    `, [sessionStart]);
+        AND DATE(paid_at) = CURRENT_DATE
+    `);
 
     const ventas = ventasResult.rows[0];
     const ventasEfectivo = Number(ventas.ventas_efectivo);
