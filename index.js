@@ -1896,11 +1896,6 @@ app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
   try {
     const { caja_chica, notas, password } = req.body;
 
-    const nextOpen = new Date();
-    nextOpen.setDate(nextOpen.getDate() + 1);
-    nextOpen.setHours(7, 0, 0, 0);
-    const next_opening_at = nextOpen.toISOString();
-
     if (caja_chica === undefined || caja_chica === null) {
       return res.status(400).json({ error: "Monto de caja chica requerido" });
     }
@@ -1920,22 +1915,26 @@ app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
       return res.status(401).json({ error: "Contraseña incorrecta" });
     }
 
-    await pool.query(`
-      INSERT INTO caja_diaria (fecha, caja_chica_apertura, caja_chica_cierre, cerrado_por, cerrado_at, notas)
-      VALUES (CURRENT_DATE, 0, $1, $2, NOW(), $3)
-      ON CONFLICT (fecha) DO UPDATE
-        SET caja_chica_cierre = $1,
-            cerrado_por = $2,
-            cerrado_at = NOW(),
-            notas = COALESCE($3, caja_diaria.notas)
-    `, [monto, req.user.id, notas || null]);
-
+    // Guardar cierre en historial
     await pool.query(`
       INSERT INTO caja_cierres (fecha, monto, notas, cerrado_por, cerrado_at)
       VALUES (CURRENT_DATE, $1, $2, $3, NOW())
     `, [monto, notas || null, req.user.id]);
 
-    res.json({ ok: true, message: "Caja cerrada correctamente" });
+    // Resetear caja_diaria para nueva sesión con el nuevo monto de apertura
+    await pool.query(`
+      INSERT INTO caja_diaria (fecha, caja_chica_apertura, session_start_at)
+      VALUES (CURRENT_DATE, $1, NOW())
+      ON CONFLICT (fecha) DO UPDATE
+        SET caja_chica_apertura = $1,
+            caja_chica_cierre   = NULL,
+            cerrado_por         = NULL,
+            cerrado_at          = NULL,
+            notas               = NULL,
+            session_start_at    = NOW()
+    `, [monto]);
+
+    res.json({ ok: true, message: "Caja registrada correctamente" });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error cerrando caja" });
