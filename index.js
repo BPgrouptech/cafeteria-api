@@ -326,6 +326,18 @@ app.get("/fix-price-variants", async (req, res) => {
   }
 });
 
+app.get("/fix-milk-surcharge", async (req, res) => {
+  try {
+    await pool.query(`
+      ALTER TABLE product_options ADD COLUMN IF NOT EXISTS adds_surcharge BOOLEAN DEFAULT FALSE;
+    `);
+    res.json({ ok: true, message: "Columna adds_surcharge agregada a product_options" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error en migración" });
+  }
+});
+
 app.get("/fix-extras", async (req, res) => {
   try {
     await pool.query(`
@@ -641,6 +653,7 @@ app.get("/products", auth(["admin", "mesero", "barista", "cajero"]), async (req,
               'id', po.id,
               'name', po.name,
               'affects_price', po.affects_price,
+              'adds_surcharge', po.adds_surcharge,
               'values', po.values_json
             )
           ) FILTER (WHERE po.id IS NOT NULL),
@@ -774,13 +787,13 @@ app.delete("/products/:id", auth(["admin"]), async (req, res) => {
 app.post("/products/:id/options", auth(["admin"]), async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, values, affects_price } = req.body;
+    const { name, values, affects_price, adds_surcharge } = req.body;
 
     const result = await pool.query(
-      `INSERT INTO product_options (product_id, name, values_json, affects_price)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO product_options (product_id, name, values_json, affects_price, adds_surcharge)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [id, name, JSON.stringify(values || []), affects_price || false]
+      [id, name, JSON.stringify(values || []), affects_price || false, adds_surcharge || false]
     );
 
     res.json(result.rows[0]);
@@ -1030,6 +1043,19 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
             unitPrice = Number(variant.price);
             break;
           }
+        }
+      }
+
+      // Agregar cargos extra (ej. leche premium)
+      const surchargeOptsResult = await client.query(
+        "SELECT * FROM product_options WHERE product_id = $1 AND adds_surcharge = TRUE",
+        [product.id]
+      );
+      for (const opt of surchargeOptsResult.rows) {
+        const selectedLabel = item.options?.[opt.name];
+        if (selectedLabel && Array.isArray(opt.values_json)) {
+          const variant = opt.values_json.find(v => v.label === selectedLabel);
+          if (variant?.surcharge) unitPrice += Number(variant.surcharge);
         }
       }
 
@@ -1370,6 +1396,18 @@ app.put("/orders/:id", auth(["admin", "mesero"]), verificarSistemaAbierto, async
             unitPrice = Number(variant.price);
             break;
           }
+        }
+      }
+
+      const surchargeOptsResult2 = await client.query(
+        "SELECT * FROM product_options WHERE product_id = $1 AND adds_surcharge = TRUE",
+        [product.id]
+      );
+      for (const opt of surchargeOptsResult2.rows) {
+        const selectedLabel = item.options?.[opt.name];
+        if (selectedLabel && Array.isArray(opt.values_json)) {
+          const variant = opt.values_json.find(v => v.label === selectedLabel);
+          if (variant?.surcharge) unitPrice += Number(variant.surcharge);
         }
       }
 
