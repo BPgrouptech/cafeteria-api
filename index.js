@@ -1362,7 +1362,7 @@ app.put("/orders/:id/pay", auth(["admin", "cajero"]), verificarSistemaAbierto, a
   }
 });
 
-app.put("/orders/:id", auth(["admin", "mesero"]), verificarSistemaAbierto, async (req, res) => {
+app.put("/orders/:id", auth(["admin", "mesero", "barista"]), verificarSistemaAbierto, async (req, res) => {
   const client = await pool.connect();
 
   try {
