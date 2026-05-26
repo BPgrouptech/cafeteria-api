@@ -2165,9 +2165,9 @@ app.get("/orders/:id/ticket", async (req, res) => {
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: {
-    origin: "*",
-  },
+  cors: { origin: "*" },
+  pingInterval: 10000,
+  pingTimeout: 5000,
 });
 
 io.on("connection", (socket) => {
