@@ -338,6 +338,18 @@ app.get("/fix-milk-surcharge", async (req, res) => {
   }
 });
 
+app.get("/fix-ingredients-image", async (req, res) => {
+  try {
+    await pool.query(`
+      ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS image_key TEXT;
+    `);
+    res.json({ ok: true, message: "Columna image_key agregada a ingredients" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error en migración" });
+  }
+});
+
 app.get("/fix-extras", async (req, res) => {
   try {
     await pool.query(`
@@ -364,23 +376,34 @@ app.get("/ingredients", auth(["admin"]), async (req, res) => {
     const result = await pool.query(
       "SELECT * FROM ingredients ORDER BY name ASC"
     );
-    res.json(result.rows);
+    const ingredients = await Promise.all(
+      result.rows.map(async (ing) => ({
+        ...ing,
+        image_url: await getSignedImageUrl(ing.image_key),
+      }))
+    );
+    res.json(ingredients);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error obteniendo ingredientes" });
   }
 });
 
-app.post("/ingredients", auth(["admin"]), async (req, res) => {
+app.post("/ingredients", auth(["admin"]), upload.single("image"), async (req, res) => {
   try {
     const { name, unit, stock, min_stock } = req.body;
     if (!name || !unit) return res.status(400).json({ error: "Nombre y unidad requeridos" });
+
+    let imageKey = null;
+    if (req.file) imageKey = await uploadToR2(req.file);
+
     const result = await pool.query(
-      `INSERT INTO ingredients (name, unit, stock, min_stock)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [name, unit, Number(stock) || 0, Number(min_stock) || 0]
+      `INSERT INTO ingredients (name, unit, stock, min_stock, image_key)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [name, unit, Number(stock) || 0, Number(min_stock) || 0, imageKey]
     );
-    res.json(result.rows[0]);
+    const ing = result.rows[0];
+    res.json({ ...ing, image_url: await getSignedImageUrl(ing.image_key) });
   } catch (error) {
     if (error.code === "23505") {
       return res.status(400).json({ error: `Ya existe un ingrediente llamado "${req.body.name}"` });
@@ -390,16 +413,22 @@ app.post("/ingredients", auth(["admin"]), async (req, res) => {
   }
 });
 
-app.put("/ingredients/:id", auth(["admin"]), async (req, res) => {
+app.put("/ingredients/:id", auth(["admin"]), upload.single("image"), async (req, res) => {
   try {
     const { id } = req.params;
     const { name, unit, min_stock } = req.body;
+
+    let imageKey = null;
+    if (req.file) imageKey = await uploadToR2(req.file);
+
     const result = await pool.query(
-      `UPDATE ingredients SET name = $1, unit = $2, min_stock = $3 WHERE id = $4 RETURNING *`,
-      [name, unit, Number(min_stock) || 0, id]
+      `UPDATE ingredients SET name = $1, unit = $2, min_stock = $3,
+       image_key = COALESCE($4, image_key) WHERE id = $5 RETURNING *`,
+      [name, unit, Number(min_stock) || 0, imageKey, id]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: "Ingrediente no encontrado" });
-    res.json(result.rows[0]);
+    const ing = result.rows[0];
+    res.json({ ...ing, image_url: await getSignedImageUrl(ing.image_key) });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error actualizando ingrediente" });
