@@ -2051,9 +2051,11 @@ app.get("/orders/:id/ticket", async (req, res) => {
     const fecha = new Date(order.paid_at || order.created_at);
     const fechaStr = fecha.toLocaleDateString("es-MX", {
       day: "2-digit", month: "2-digit", year: "numeric",
+      timeZone: "America/Mexico_City",
     });
     const horaStr = fecha.toLocaleTimeString("es-MX", {
       hour: "2-digit", minute: "2-digit",
+      timeZone: "America/Mexico_City",
     });
 
     const mesa = order.table_number
