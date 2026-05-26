@@ -1019,7 +1019,7 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
   const client = await pool.connect();
 
   try {
-    const { items, extras: orderExtras, table_number, pickup_name } = req.body;
+    const { items, extras: orderExtras, custom_extras: customExtras, table_number, pickup_name } = req.body;
 
     if (table_number === undefined) {
       return res.status(400).json({ error: "Número de mesa requerido" });
@@ -1027,8 +1027,9 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
 
     const hasItems = items && items.length > 0;
     const hasExtras = orderExtras && orderExtras.length > 0;
+    const hasCustomExtras = customExtras && customExtras.length > 0;
 
-    if (!hasItems && !hasExtras) {
+    if (!hasItems && !hasExtras && !hasCustomExtras) {
       return res.status(400).json({ error: "La orden no tiene productos ni extras" });
     }
 
@@ -1127,6 +1128,19 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
          (order_id, extra_id, product_name, quantity, unit_price, notes, options_json)
          VALUES ($1, $2, $3, $4, $5, $6, '{}')`,
         [order.id, extraData.id, extraData.name, quantity, unitPrice, extra.notes || ""]
+      );
+    }
+
+    for (const custom of (customExtras || [])) {
+      if (!custom.name || !String(custom.name).trim()) continue;
+      const quantity = Number(custom.quantity || 1);
+      const unitPrice = Number(custom.price || 0);
+      total += quantity * unitPrice;
+      await client.query(
+        `INSERT INTO order_items
+         (order_id, product_name, quantity, unit_price, notes, options_json)
+         VALUES ($1, $2, $3, $4, $5, '{}')`,
+        [order.id, String(custom.name).trim(), quantity, unitPrice, custom.notes || ""]
       );
     }
 
@@ -1367,7 +1381,7 @@ app.put("/orders/:id", auth(["admin", "mesero", "barista"]), verificarSistemaAbi
 
   try {
     const { id } = req.params;
-    const { items, extras: orderExtras, table_number, pickup_name } = req.body;
+    const { items, extras: orderExtras, custom_extras: customExtras, table_number, pickup_name } = req.body;
 
     if (table_number === undefined) {
       return res.status(400).json({ error: "Número de mesa requerido" });
@@ -1375,8 +1389,9 @@ app.put("/orders/:id", auth(["admin", "mesero", "barista"]), verificarSistemaAbi
 
     const hasItems = items && items.length > 0;
     const hasExtras = orderExtras && orderExtras.length > 0;
+    const hasCustomExtras = customExtras && customExtras.length > 0;
 
-    if (!hasItems && !hasExtras) {
+    if (!hasItems && !hasExtras && !hasCustomExtras) {
       return res.status(400).json({ error: "La orden no tiene productos ni extras" });
     }
 
@@ -1479,6 +1494,19 @@ app.put("/orders/:id", auth(["admin", "mesero", "barista"]), verificarSistemaAbi
          (order_id, extra_id, product_name, quantity, unit_price, notes, options_json)
          VALUES ($1, $2, $3, $4, $5, $6, '{}')`,
         [id, extraData.id, extraData.name, quantity, unitPrice, extra.notes || ""]
+      );
+    }
+
+    for (const custom of (customExtras || [])) {
+      if (!custom.name || !String(custom.name).trim()) continue;
+      const quantity = Number(custom.quantity || 1);
+      const unitPrice = Number(custom.price || 0);
+      total += quantity * unitPrice;
+      await client.query(
+        `INSERT INTO order_items
+         (order_id, product_name, quantity, unit_price, notes, options_json)
+         VALUES ($1, $2, $3, $4, $5, '{}')`,
+        [id, String(custom.name).trim(), quantity, unitPrice, custom.notes || ""]
       );
     }
 
