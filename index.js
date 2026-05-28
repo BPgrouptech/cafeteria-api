@@ -1668,12 +1668,12 @@ app.get("/orders/history", auth(["admin"]), async (req, res) => {
 
     if (year) {
       params.push(Number(year));
-      conditions.push(`EXTRACT(YEAR FROM o.created_at) = $${params.length}`);
+      conditions.push(`EXTRACT(YEAR FROM o.created_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
     }
 
     if (month) {
       params.push(Number(month));
-      conditions.push(`EXTRACT(MONTH FROM o.created_at) = $${params.length}`);
+      conditions.push(`EXTRACT(MONTH FROM o.created_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -1721,12 +1721,12 @@ app.get("/ventas/resumen", auth(["admin"]), async (req, res) => {
 
     if (year) {
       params.push(Number(year));
-      conditions.push(`EXTRACT(YEAR FROM o.paid_at) = $${params.length}`);
+      conditions.push(`EXTRACT(YEAR FROM o.paid_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
     }
 
     if (month) {
       params.push(Number(month));
-      conditions.push(`EXTRACT(MONTH FROM o.paid_at) = $${params.length}`);
+      conditions.push(`EXTRACT(MONTH FROM o.paid_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
     }
 
     const where = `WHERE ${conditions.join(" AND ")}`;
