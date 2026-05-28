@@ -1928,19 +1928,22 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
 
     let caja;
     if (cajaResult.rows.length === 0) {
-      // Nuevo día: la apertura es el monto del último cierre registrado en caja_cierres
-      // (caja_diaria.caja_chica_cierre nunca se puebla; el historial real está en caja_cierres)
+      // Nuevo día: apertura = monto del último cierre; session_start_at = hora de ese cierre.
+      // Así los valores NO se reinician al cambiar de fecha — solo se reinician al cerrar caja.
       const anteriorResult = await pool.query(`
-        SELECT COALESCE(
-          (SELECT monto FROM caja_cierres ORDER BY cerrado_at DESC LIMIT 1),
-          0
-        ) AS apertura_valor
+        SELECT
+          COALESCE((SELECT monto      FROM caja_cierres ORDER BY cerrado_at DESC LIMIT 1), 0) AS apertura_valor,
+          (SELECT cerrado_at FROM caja_cierres ORDER BY cerrado_at DESC LIMIT 1)               AS ultimo_cierre_at
       `);
-      const apertura = Number(anteriorResult.rows[0]?.apertura_valor || 0);
+      const apertura       = Number(anteriorResult.rows[0]?.apertura_valor || 0);
+      // Si nunca hubo cierre, contamos ventas desde el principio de los tiempos
+      const sessionStart   = anteriorResult.rows[0]?.ultimo_cierre_at
+        ? `'${anteriorResult.rows[0].ultimo_cierre_at}'::timestamp`
+        : `'2000-01-01'::timestamp`;
 
       const insertResult = await pool.query(`
         INSERT INTO caja_diaria (fecha, caja_chica_apertura, session_start_at)
-        VALUES (${MX_TODAY}, $1, NOW())
+        VALUES (${MX_TODAY}, $1, ${sessionStart})
         RETURNING *
       `, [apertura]);
       caja = insertResult.rows[0];
