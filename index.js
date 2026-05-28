@@ -98,6 +98,32 @@ function auth(requiredRoles = []) {
   };
 }
 
+// ─── Bitácora ─────────────────────────────────────────────────────────────────
+// Crea la tabla al arrancar si no existe (idempotente)
+pool.query(`
+  CREATE TABLE IF NOT EXISTS bitacora (
+    id         SERIAL PRIMARY KEY,
+    user_id    INTEGER,
+    user_name  TEXT,
+    user_role  TEXT,
+    accion     TEXT NOT NULL,
+    detalle    TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+  )
+`).catch((e) => console.error("Error creando tabla bitacora:", e.message));
+
+async function logAction(user, accion, detalle = null) {
+  try {
+    await pool.query(
+      `INSERT INTO bitacora (user_id, user_name, user_role, accion, detalle, created_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())`,
+      [user?.id ?? null, user?.name ?? null, user?.role ?? null, accion, detalle]
+    );
+  } catch (e) {
+    console.error("Bitácora error:", e.message);
+  }
+}
+
 async function isSistemaAbierto() {
   return { abierto: true };
 }
@@ -583,6 +609,8 @@ app.post("/login", async (req, res) => {
       { expiresIn: "7d" }
     );
 
+    logAction(user, "Inicio de sesión");
+
     res.json({
       token,
       user: {
@@ -615,6 +643,7 @@ app.post("/users", auth(["admin"]), async (req, res) => {
       [name, username, hash, role]
     );
 
+    logAction(req.user, `Usuario creado: ${name}`, `rol: ${role}`);
     res.json(result.rows[0]);
   } catch (error) {
     console.error(error);
@@ -655,7 +684,7 @@ app.delete("/users/:id", auth(["admin"]), async (req, res) => {
       return res.status(401).json({ error: "Contraseña incorrecta" });
     }
 
-    const target = await pool.query("SELECT role FROM users WHERE id = $1", [id]);
+    const target = await pool.query("SELECT name, role FROM users WHERE id = $1", [id]);
     if (target.rows.length === 0) {
       return res.status(404).json({ error: "Usuario no encontrado" });
     }
@@ -664,6 +693,7 @@ app.delete("/users/:id", auth(["admin"]), async (req, res) => {
     }
 
     await pool.query("DELETE FROM users WHERE id = $1", [id]);
+    logAction(req.user, `Usuario eliminado: ${target.rows[0].name}`, `rol: ${target.rows[0].role}`);
     res.json({ ok: true });
   } catch (error) {
     console.error(error);
@@ -731,6 +761,7 @@ app.post(
       );
 
       const product = result.rows[0];
+      logAction(req.user, `Producto creado: ${product.name}`, `categoría: ${category || "—"}`);
 
       res.json({
         ...product,
@@ -776,6 +807,7 @@ app.put(
       }
 
       const product = result.rows[0];
+      logAction(req.user, `Producto editado: ${product.name}`, `precio: $${product.price}`);
 
       res.json({
         ...product,
@@ -804,8 +836,9 @@ app.delete("/products/:id", auth(["admin"]), async (req, res) => {
       return res.status(401).json({ error: "Contraseña incorrecta" });
     }
 
+    const pResult = await pool.query("SELECT name FROM products WHERE id = $1", [id]);
     await pool.query("UPDATE products SET active = FALSE WHERE id = $1", [id]);
-
+    logAction(req.user, `Producto eliminado: ${pResult.rows[0]?.name || id}`);
     res.json({ ok: true, message: "Elemento eliminado del menú" });
   } catch (error) {
     console.error(error);
@@ -968,6 +1001,7 @@ app.post("/extras", auth(["admin"]), async (req, res) => {
       "INSERT INTO extras (name, price) VALUES ($1, $2) RETURNING *",
       [name.trim(), Number(price)]
     );
+    logAction(req.user, `Extra creado: ${name.trim()}`, `precio: $${price}`);
     res.json(result.rows[0]);
   } catch (error) {
     console.error(error);
@@ -989,6 +1023,7 @@ app.put("/extras/:id", auth(["admin"]), async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Extra no encontrado" });
     }
+    logAction(req.user, `Extra editado: ${name.trim()}`, `precio: $${price}`);
     res.json(result.rows[0]);
   } catch (error) {
     console.error(error);
@@ -999,6 +1034,7 @@ app.put("/extras/:id", auth(["admin"]), async (req, res) => {
 app.delete("/extras/:id", auth(["admin"]), async (req, res) => {
   try {
     const { id } = req.params;
+    const exResult = await pool.query("SELECT name FROM extras WHERE id = $1", [id]);
     const result = await pool.query(
       "UPDATE extras SET active = FALSE WHERE id = $1 RETURNING id",
       [id]
@@ -1006,6 +1042,7 @@ app.delete("/extras/:id", auth(["admin"]), async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Extra no encontrado" });
     }
+    logAction(req.user, `Extra eliminado: ${exResult.rows[0]?.name || id}`);
     res.json({ ok: true, message: "Extra desactivado" });
   } catch (error) {
     console.error(error);
@@ -1153,7 +1190,11 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
 
     io.emit("new_order", finalOrder.rows[0]);
 
-    res.json(finalOrder.rows[0]);
+    const fo = finalOrder.rows[0];
+    const ubicacion = fo.table_number != null ? `Mesa ${fo.table_number}` : fo.pickup_name ? `Para llevar · ${fo.pickup_name}` : "Para llevar";
+    logAction(req.user, `Orden #${fo.id} creada`, `${ubicacion} · $${fo.total}`);
+
+    res.json(fo);
   } catch (error) {
     await client.query("ROLLBACK");
     console.error(error);
@@ -1295,6 +1336,9 @@ app.put("/orders/pay-table/:tableNumber", auth(["admin", "cajero"]), verificarSi
 
     await client.query("COMMIT");
 
+    const ubicacionMesa = isLlevar ? "Para llevar" : `Mesa ${tableNumber}`;
+    logAction(req.user, `${ubicacionMesa} cobrada`, `$${total.toFixed(2)} · ${payment_method}`);
+
     res.json({ ok: true, total, cambio: change, orders: updatedOrders });
   } catch (error) {
     await client.query("ROLLBACK");
@@ -1365,9 +1409,11 @@ app.put("/orders/:id/pay", auth(["admin", "cajero"]), verificarSistemaAbierto, a
     );
 
     io.emit("order_paid", result.rows[0]);
+    const po = result.rows[0];
+    logAction(req.user, `Orden #${po.id} cobrada`, `$${po.total} · ${payment_method}`);
 
     res.json({
-      ...result.rows[0],
+      ...po,
       cambio: change,
     });
   } catch (error) {
@@ -1523,8 +1569,10 @@ app.put("/orders/:id", auth(["admin", "mesero", "barista"]), verificarSistemaAbi
     await client.query("COMMIT");
 
     io.emit("order_updated", updatedOrder.rows[0]);
+    const uo = updatedOrder.rows[0];
+    logAction(req.user, `Orden #${uo.id} modificada`, uo.table_number != null ? `Mesa ${uo.table_number}` : "Para llevar");
 
-    res.json(updatedOrder.rows[0]);
+    res.json(uo);
   } catch (error) {
     await client.query("ROLLBACK");
     console.error(error);
@@ -1567,8 +1615,10 @@ app.put("/orders/:id/complete", auth(["admin", "barista"]), verificarSistemaAbie
     await client.query("COMMIT");
 
     io.emit("order_completed", result.rows[0]);
+    const co = result.rows[0];
+    logAction(req.user, `Orden #${co.id} completada`, co.table_number != null ? `Mesa ${co.table_number}` : "Para llevar");
 
-    res.json(result.rows[0]);
+    res.json(co);
   } catch (error) {
     await client.query("ROLLBACK");
     console.error(error);
@@ -1600,8 +1650,10 @@ app.put("/orders/:id/reopen", auth(["admin", "cajero"]), verificarSistemaAbierto
     );
 
     io.emit("order_reopened", result.rows[0]);
+    const ro = result.rows[0];
+    logAction(req.user, `Orden #${ro.id} devuelta al barista`, ro.table_number != null ? `Mesa ${ro.table_number}` : "Para llevar");
 
-    res.json(result.rows[0]);
+    res.json(ro);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error reabriendo orden" });
@@ -1673,7 +1725,9 @@ app.put("/orders/:id/cancel", auth(["admin", "mesero", "cajero"]), async (req, r
     }
 
     io.emit("order_cancelled", result.rows[0]);
-    res.json(result.rows[0]);
+    const xo = result.rows[0];
+    logAction(req.user, `Orden #${xo.id} cancelada`, xo.table_number != null ? `Mesa ${xo.table_number}` : "Para llevar");
+    res.json(xo);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error cancelando orden" });
@@ -2043,6 +2097,7 @@ app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
             session_start_at    = NOW()
     `, [monto]);
 
+    logAction(req.user, "Cierre de caja", `Caja chica dejada: $${monto.toFixed(2)}${notas ? ` · ${notas}` : ""}`);
     res.json({ ok: true, message: "Caja registrada correctamente" });
   } catch (error) {
     console.error(error);
@@ -2066,6 +2121,20 @@ app.get("/fix-caja-cierres", async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error creando tabla caja_cierres" });
+  }
+});
+
+app.get("/bitacora", auth(["admin"]), async (req, res) => {
+  try {
+    const { limit = 200 } = req.query;
+    const result = await pool.query(
+      `SELECT * FROM bitacora ORDER BY created_at DESC LIMIT $1`,
+      [Number(limit)]
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error obteniendo bitácora" });
   }
 });
 
