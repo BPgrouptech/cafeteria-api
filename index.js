@@ -1640,18 +1640,39 @@ app.delete("/orders/:id", auth(["admin"]), async (req, res) => {
   }
 });
 
-app.put("/orders/:id/cancel", auth(["admin"]), async (req, res) => {
+app.put("/orders/:id/cancel", auth(["admin", "mesero", "cajero"]), async (req, res) => {
   try {
     const { id } = req.params;
+    const { password } = req.body;
 
+    if (!password) {
+      return res.status(400).json({ error: "Contraseña requerida para cancelar" });
+    }
+
+    // Verificar contraseña del usuario que cancela
+    const userResult = await pool.query("SELECT * FROM users WHERE id = $1", [req.user.id]);
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ error: "Usuario no encontrado" });
+    }
+    const valid = await bcrypt.compare(password, userResult.rows[0].password_hash);
+    if (!valid) {
+      return res.status(401).json({ error: "Contraseña incorrecta" });
+    }
+
+    // No permitir cancelar órdenes ya pagadas
     const result = await pool.query(
       `UPDATE orders
        SET status = 'cancelado'
-       WHERE id = $1
+       WHERE id = $1 AND status != 'pagado'
        RETURNING *`,
       [id]
     );
 
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: "Orden no encontrada o ya fue pagada" });
+    }
+
+    io.emit("order_cancelled", result.rows[0]);
     res.json(result.rows[0]);
   } catch (error) {
     console.error(error);
