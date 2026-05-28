@@ -2101,7 +2101,8 @@ app.get("/orders/:id/ticket", async (req, res) => {
     );
 
     const items = itemsResult.rows;
-    const fecha = new Date(order.paid_at || order.created_at);
+    // Si ya fue pagada: usa paid_at. Si no: usa el momento actual (se está imprimiendo la cuenta)
+    const fecha = order.paid_at ? new Date(order.paid_at) : new Date();
     const fechaStr = fecha.toLocaleDateString("es-MX", {
       day: "2-digit", month: "2-digit", year: "numeric",
       timeZone: "America/Mexico_City",
