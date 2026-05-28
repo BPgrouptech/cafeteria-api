@@ -1884,19 +1884,21 @@ app.get("/fix-caja-chica", async (req, res) => {
 
 app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
   try {
+    // Fecha de hoy en zona horaria México (evita que el cambio de día UTC a las 6pm MX rompa la caja)
+    const MX_TODAY = `(NOW() AT TIME ZONE 'America/Mexico_City')::date`;
+
     // 1. Obtener o crear el registro de caja del día
     let cajaResult = await pool.query(
-      "SELECT * FROM caja_diaria WHERE fecha = CURRENT_DATE"
+      `SELECT * FROM caja_diaria WHERE fecha = ${MX_TODAY}`
     );
 
     let caja;
     if (cajaResult.rows.length === 0) {
-      // Nuevo día: crear registro con la caja chica del cierre anterior
+      // Nuevo día: la apertura es el monto del último cierre registrado en caja_cierres
+      // (caja_diaria.caja_chica_cierre nunca se puebla; el historial real está en caja_cierres)
       const anteriorResult = await pool.query(`
         SELECT COALESCE(
-          (SELECT caja_chica_cierre FROM caja_diaria
-           WHERE caja_chica_cierre IS NOT NULL
-           ORDER BY cerrado_at DESC LIMIT 1),
+          (SELECT monto FROM caja_cierres ORDER BY cerrado_at DESC LIMIT 1),
           0
         ) AS apertura_valor
       `);
@@ -1904,7 +1906,7 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
 
       const insertResult = await pool.query(`
         INSERT INTO caja_diaria (fecha, caja_chica_apertura, session_start_at)
-        VALUES (CURRENT_DATE, $1, NOW())
+        VALUES (${MX_TODAY}, $1, NOW())
         RETURNING *
       `, [apertura]);
       caja = insertResult.rows[0];
@@ -1912,8 +1914,12 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
       caja = cajaResult.rows[0];
     }
 
-    // 2. Ventas del día: desde session_start_at (o medianoche UTC si es NULL)
-    const sessionStart = caja.session_start_at || new Date(new Date().toISOString().substring(0, 10) + 'T00:00:00Z');
+    // 2. Ventas de esta sesión: desde session_start_at
+    //    Si no hay session_start_at, usar inicio del día México como fallback
+    const sessionStart = caja.session_start_at
+      || await pool.query(`SELECT (${MX_TODAY})::timestamp AT TIME ZONE 'America/Mexico_City' AS ts`)
+           .then(r => r.rows[0].ts);
+
     const ventasResult = await pool.query(`
       SELECT
         COUNT(*) AS total_ordenes,
@@ -1939,9 +1945,7 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
         total_ordenes: Number(ventas.total_ordenes),
       },
       total_en_caja: Number((apertura + ventasEfectivo).toFixed(2)),
-      cerrado: caja.caja_chica_cierre !== null,
-      caja_chica_cierre: caja.caja_chica_cierre !== null ? Number(caja.caja_chica_cierre) : null,
-      cerrado_at: caja.cerrado_at || null,
+      session_start_at: caja.session_start_at || null,
     });
   } catch (error) {
     console.error(error);
@@ -1972,16 +1976,19 @@ app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
       return res.status(401).json({ error: "Contraseña incorrecta" });
     }
 
+    const MX_TODAY = `(NOW() AT TIME ZONE 'America/Mexico_City')::date`;
+
     // Guardar cierre en historial
     await pool.query(`
       INSERT INTO caja_cierres (fecha, monto, notas, cerrado_por, cerrado_at)
-      VALUES (CURRENT_DATE, $1, $2, $3, NOW())
+      VALUES (${MX_TODAY}, $1, $2, $3, NOW())
     `, [monto, notas || null, req.user.id]);
 
-    // Resetear caja_diaria para nueva sesión con el nuevo monto de apertura
+    // Resetear caja_diaria: nueva sesión con el nuevo monto como apertura.
+    // session_start_at = NOW() hace que solo las ventas POSTERIORES cuenten.
     await pool.query(`
       INSERT INTO caja_diaria (fecha, caja_chica_apertura, session_start_at)
-      VALUES (CURRENT_DATE, $1, NOW())
+      VALUES (${MX_TODAY}, $1, NOW())
       ON CONFLICT (fecha) DO UPDATE
         SET caja_chica_apertura = $1,
             caja_chica_cierre   = NULL,
