@@ -429,6 +429,7 @@ app.post("/ingredients", auth(["admin"]), upload.single("image"), async (req, re
       [name, unit, Number(stock) || 0, Number(min_stock) || 0, imageKey]
     );
     const ing = result.rows[0];
+    logAction(req.user, `Ingrediente creado: ${ing.name}`, `unidad: ${ing.unit} · stock inicial: ${ing.stock}`);
     res.json({ ...ing, image_url: await getSignedImageUrl(ing.image_key) });
   } catch (error) {
     if (error.code === "23505") {
@@ -454,6 +455,7 @@ app.put("/ingredients/:id", auth(["admin"]), upload.single("image"), async (req,
     );
     if (result.rows.length === 0) return res.status(404).json({ error: "Ingrediente no encontrado" });
     const ing = result.rows[0];
+    logAction(req.user, `Ingrediente editado: ${ing.name}`, `unidad: ${ing.unit} · stock mín: ${ing.min_stock}`);
     res.json({ ...ing, image_url: await getSignedImageUrl(ing.image_key) });
   } catch (error) {
     console.error(error);
@@ -464,7 +466,9 @@ app.put("/ingredients/:id", auth(["admin"]), upload.single("image"), async (req,
 app.delete("/ingredients/:id", auth(["admin"]), async (req, res) => {
   try {
     const { id } = req.params;
+    const ingResult = await pool.query("SELECT name FROM ingredients WHERE id = $1", [id]);
     await pool.query("DELETE FROM ingredients WHERE id = $1", [id]);
+    logAction(req.user, `Ingrediente eliminado: ${ingResult.rows[0]?.name || id}`);
     res.json({ ok: true });
   } catch (error) {
     console.error(error);
@@ -482,7 +486,10 @@ app.put("/ingredients/:id/stock", auth(["admin"]), async (req, res) => {
       [Number(cantidad), id]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: "Ingrediente no encontrado" });
-    res.json(result.rows[0]);
+    const ing = result.rows[0];
+    const signo = Number(cantidad) >= 0 ? "+" : "";
+    logAction(req.user, `Stock ajustado: ${ing.name}`, `${signo}${cantidad} ${ing.unit} → total: ${ing.stock} ${ing.unit}`);
+    res.json(ing);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error ajustando stock" });
@@ -521,6 +528,11 @@ app.post("/products/:id/recipe", auth(["admin"]), async (req, res) => {
        RETURNING *`,
       [id, ingredient_id, Number(quantity)]
     );
+    const [prodRow, ingRow] = await Promise.all([
+      pool.query("SELECT name FROM products WHERE id = $1", [id]),
+      pool.query("SELECT name, unit FROM ingredients WHERE id = $1", [ingredient_id]),
+    ]);
+    logAction(req.user, `Receta actualizada: ${prodRow.rows[0]?.name || id}`, `${ingRow.rows[0]?.name || ingredient_id}: ${quantity} ${ingRow.rows[0]?.unit || ""}`);
     res.json(result.rows[0]);
   } catch (error) {
     console.error(error);
@@ -531,10 +543,15 @@ app.post("/products/:id/recipe", auth(["admin"]), async (req, res) => {
 app.delete("/products/:id/recipe/:ingredientId", auth(["admin"]), async (req, res) => {
   try {
     const { id, ingredientId } = req.params;
+    const [prodRow, ingRow] = await Promise.all([
+      pool.query("SELECT name FROM products WHERE id = $1", [id]),
+      pool.query("SELECT name FROM ingredients WHERE id = $1", [ingredientId]),
+    ]);
     await pool.query(
       "DELETE FROM product_ingredients WHERE product_id = $1 AND ingredient_id = $2",
       [id, ingredientId]
     );
+    logAction(req.user, `Ingrediente quitado de receta: ${prodRow.rows[0]?.name || id}`, `ingrediente: ${ingRow.rows[0]?.name || ingredientId}`);
     res.json({ ok: true });
   } catch (error) {
     console.error(error);
@@ -858,6 +875,8 @@ app.post("/products/:id/options", auth(["admin"]), async (req, res) => {
       [id, name, JSON.stringify(values || []), affects_price || false, adds_surcharge || false]
     );
 
+    const prodRow = await pool.query("SELECT name FROM products WHERE id = $1", [id]);
+    logAction(req.user, `Opción agregada: ${prodRow.rows[0]?.name || id}`, `opción: ${name}`);
     res.json(result.rows[0]);
   } catch (error) {
     console.error(error);
@@ -869,7 +888,13 @@ app.delete("/product-options/:id", auth(["admin"]), async (req, res) => {
   try {
     const { id } = req.params;
 
+    const optRow = await pool.query(
+      `SELECT po.name AS opt_name, p.name AS prod_name
+       FROM product_options po JOIN products p ON p.id = po.product_id
+       WHERE po.id = $1`, [id]
+    );
     await pool.query("DELETE FROM product_options WHERE id = $1", [id]);
+    logAction(req.user, `Opción eliminada: ${optRow.rows[0]?.prod_name || "producto"}`, `opción: ${optRow.rows[0]?.opt_name || id}`);
 
     res.json({ ok: true, message: "Opción eliminada" });
   } catch (error) {
@@ -1676,6 +1701,11 @@ app.delete("/orders/:id", auth(["admin"]), async (req, res) => {
       return res.status(401).json({ error: "Contraseña incorrecta" });
     }
 
+    const orderInfo = await pool.query(
+      "SELECT status, total, table_number FROM orders WHERE id = $1",
+      [id]
+    );
+
     const result = await pool.query(
       "DELETE FROM orders WHERE id = $1 RETURNING id",
       [id]
@@ -1685,6 +1715,9 @@ app.delete("/orders/:id", auth(["admin"]), async (req, res) => {
       return res.status(404).json({ error: "Orden no encontrada" });
     }
 
+    const info = orderInfo.rows[0];
+    const ubicacion = info?.table_number != null ? `Mesa ${info.table_number}` : "Para llevar";
+    logAction(req.user, `Orden #${id} eliminada del historial`, `estado: ${info?.status} · ${ubicacion} · $${info?.total}`);
     res.json({ ok: true });
   } catch (error) {
     console.error(error);
@@ -1945,6 +1978,7 @@ app.put("/configuracion/hora-apertura", auth(["admin"]), async (req, res) => {
       ON CONFLICT (clave) DO UPDATE SET valor = $1, updated_at = NOW()
     `, [hora_apertura]);
 
+    logAction(req.user, `Hora de apertura cambiada`, `nueva hora: ${hora_apertura}`);
     res.json({ ok: true, hora_apertura });
   } catch (error) {
     console.error(error);
