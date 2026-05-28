@@ -1755,14 +1755,17 @@ app.get("/ventas/resumen", auth(["admin"]), async (req, res) => {
     const [productsResult, totalsResult] = await Promise.all([
       pool.query(`
         SELECT
+          COALESCE(p.category, 'Otros') AS category,
           oi.product_name,
-          SUM(oi.quantity) AS total_cantidad,
+          SUM(oi.quantity)              AS total_cantidad,
           SUM(oi.quantity * oi.unit_price) AS total_vendido
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
+        LEFT JOIN products p ON p.id = oi.product_id
         ${where}
-        GROUP BY oi.product_name
-        ORDER BY total_vendido DESC
+          AND oi.product_id IS NOT NULL
+        GROUP BY p.category, oi.product_name
+        ORDER BY p.category, total_vendido DESC
       `, params),
       pool.query(`
         SELECT
