@@ -683,7 +683,7 @@ app.get("/products", auth(["admin", "mesero", "barista", "cajero"]), async (req,
               'name', po.name,
               'affects_price', po.affects_price,
               'adds_surcharge', po.adds_surcharge,
-              'values', po.values_json
+              'values', po.values_json::json
             )
           ) FILTER (WHERE po.id IS NOT NULL),
           '[]'
