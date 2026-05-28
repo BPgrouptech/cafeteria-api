@@ -1772,8 +1772,21 @@ app.get("/debug-caja", async (req, res) => {
       ORDER BY paid_at DESC
       LIMIT 10
     `);
-    const now = await pool.query("SELECT NOW() as now, CURRENT_DATE as today");
-    res.json({ caja: caja.rows, recent_paid_orders: orders.rows, server_time: now.rows[0] });
+    const timeInfo = await pool.query(`
+      SELECT
+        NOW() AS server_now_utc,
+        NOW() AT TIME ZONE 'America/Mexico_City' AS server_now_mx,
+        CURRENT_DATE AS utc_date,
+        (NOW() AT TIME ZONE 'America/Mexico_City')::date AS mx_date,
+        (SELECT session_start_at FROM caja_diaria ORDER BY fecha DESC LIMIT 1) AS last_session_start
+    `);
+    const cierres = await pool.query("SELECT * FROM caja_cierres ORDER BY cerrado_at DESC LIMIT 5");
+    res.json({
+      caja: caja.rows,
+      recent_paid_orders: orders.rows,
+      time_info: timeInfo.rows[0],
+      cierres: cierres.rows,
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: error.message });
@@ -1914,12 +1927,9 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
       caja = cajaResult.rows[0];
     }
 
-    // 2. Ventas de esta sesión: desde session_start_at
-    //    Si no hay session_start_at, usar inicio del día México como fallback
-    const sessionStart = caja.session_start_at
-      || await pool.query(`SELECT (${MX_TODAY})::timestamp AT TIME ZONE 'America/Mexico_City' AS ts`)
-           .then(r => r.rows[0].ts);
-
+    // 2. Ventas desde session_start_at — comparación 100% en SQL para evitar
+    //    ambigüedad TIMESTAMP vs TIMESTAMPTZ al pasar fechas por JavaScript.
+    //    Fallback: inicio del día en hora México si session_start_at es NULL.
     const ventasResult = await pool.query(`
       SELECT
         COUNT(*) AS total_ordenes,
@@ -1928,12 +1938,20 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
         COALESCE(SUM(CASE WHEN payment_method = 'tarjeta' THEN total ELSE 0 END), 0) AS ventas_tarjeta
       FROM orders
       WHERE status = 'pagado'
-        AND paid_at >= $1
-    `, [sessionStart]);
+        AND paid_at >= COALESCE(
+          (SELECT session_start_at FROM caja_diaria WHERE fecha = ${MX_TODAY}),
+          (${MX_TODAY}::timestamp AT TIME ZONE 'America/Mexico_City' AT TIME ZONE 'UTC')
+        )
+    `);
 
     const ventas = ventasResult.rows[0];
     const ventasEfectivo = Number(ventas.ventas_efectivo);
     const apertura = Number(caja.caja_chica_apertura);
+
+    // session_start_at para mostrarlo en el frontend
+    const sessionStartAt = caja.session_start_at
+      ? new Date(caja.session_start_at).toISOString()
+      : null;
 
     res.json({
       fecha: caja.fecha,
@@ -1945,7 +1963,7 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
         total_ordenes: Number(ventas.total_ordenes),
       },
       total_en_caja: Number((apertura + ventasEfectivo).toFixed(2)),
-      session_start_at: caja.session_start_at || null,
+      session_start_at: sessionStartAt,
     });
   } catch (error) {
     console.error(error);
