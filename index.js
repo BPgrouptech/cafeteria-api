@@ -2133,12 +2133,16 @@ app.get("/orders/:id/ticket", async (req, res) => {
     }).join("");
 
     const total = Number(order.total).toFixed(2);
-    const metodo = order.payment_method === "efectivo" ? "Efectivo" : "Tarjeta";
 
-    let pagoHtml = `<tr><td>Pago con</td><td class="r">${metodo}</td></tr>`;
-    if (order.payment_method === "efectivo" && Number(order.amount_paid) > 0) {
-      pagoHtml += `<tr><td>Recibido</td><td class="r">$${Number(order.amount_paid).toFixed(2)}</td></tr>`;
-      pagoHtml += `<tr class="cambio"><td>Cambio</td><td class="r">$${Number(order.change_given || 0).toFixed(2)}</td></tr>`;
+    // Solo mostrar método de pago si ya fue cobrada; si no, solo el total
+    let pagoHtml = "";
+    if (order.payment_method) {
+      const metodo = order.payment_method === "efectivo" ? "Efectivo" : "Tarjeta";
+      pagoHtml = `<tr><td>Pago con</td><td class="r">${metodo}</td></tr>`;
+      if (order.payment_method === "efectivo" && Number(order.amount_paid) > 0) {
+        pagoHtml += `<tr><td>Recibido</td><td class="r">$${Number(order.amount_paid).toFixed(2)}</td></tr>`;
+        pagoHtml += `<tr class="cambio"><td>Cambio</td><td class="r">$${Number(order.change_given || 0).toFixed(2)}</td></tr>`;
+      }
     }
 
     const html = `<!DOCTYPE html>
