@@ -112,6 +112,21 @@ pool.query(`
   )
 `).catch((e) => console.error("Error creando tabla bitacora:", e.message));
 
+pool.query(`
+  CREATE TABLE IF NOT EXISTS caja_cierres (
+    id          SERIAL PRIMARY KEY,
+    fecha       DATE NOT NULL,
+    monto       NUMERIC(10,2) NOT NULL,
+    notas       TEXT,
+    cerrado_por INTEGER REFERENCES users(id),
+    cerrado_at  TIMESTAMP DEFAULT NOW()
+  )
+`).catch((e) => console.error("Error creando tabla caja_cierres:", e.message));
+
+pool.query(`
+  ALTER TABLE IF EXISTS caja_diaria ADD COLUMN IF NOT EXISTS session_start_at TIMESTAMP
+`).catch((e) => console.error("Error migrando session_start_at:", e.message));
+
 async function logAction(user, accion, detalle = null) {
   try {
     await pool.query(
@@ -2026,17 +2041,15 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
           COALESCE((SELECT monto      FROM caja_cierres ORDER BY cerrado_at DESC LIMIT 1), 0) AS apertura_valor,
           (SELECT cerrado_at FROM caja_cierres ORDER BY cerrado_at DESC LIMIT 1)               AS ultimo_cierre_at
       `);
-      const apertura       = Number(anteriorResult.rows[0]?.apertura_valor || 0);
-      // Si nunca hubo cierre, contamos ventas desde el principio de los tiempos
-      const sessionStart   = anteriorResult.rows[0]?.ultimo_cierre_at
-        ? `'${anteriorResult.rows[0].ultimo_cierre_at}'::timestamp`
-        : `'2000-01-01'::timestamp`;
+      const apertura    = Number(anteriorResult.rows[0]?.apertura_valor || 0);
+      const sessionStart = anteriorResult.rows[0]?.ultimo_cierre_at ?? new Date('2000-01-01');
 
-      const insertResult = await pool.query(`
-        INSERT INTO caja_diaria (fecha, caja_chica_apertura, session_start_at)
-        VALUES (${MX_TODAY}, $1, ${sessionStart})
-        RETURNING *
-      `, [apertura]);
+      const insertResult = await pool.query(
+        `INSERT INTO caja_diaria (fecha, caja_chica_apertura, session_start_at)
+         VALUES (${MX_TODAY}, $1, $2)
+         RETURNING *`,
+        [apertura, sessionStart]
+      );
       caja = insertResult.rows[0];
     } else {
       caja = cajaResult.rows[0];
