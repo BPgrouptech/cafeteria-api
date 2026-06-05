@@ -2024,26 +2024,23 @@ app.get("/fix-caja-chica", async (req, res) => {
 
 app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
   try {
-    // Fecha de hoy en zona horaria México (evita que el cambio de día UTC a las 6pm MX rompa la caja)
     const MX_TODAY = `(NOW() AT TIME ZONE 'America/Mexico_City')::date`;
 
-    // 1. Obtener o crear el registro de caja del día
+    // 1. Fuente de verdad: último cierre real en caja_cierres
+    const cierreResult = await pool.query(`
+      SELECT cerrado_at, monto FROM caja_cierres ORDER BY cerrado_at DESC LIMIT 1
+    `);
+    const ultimoCierre = cierreResult.rows[0] ?? null;
+    const sessionStart = ultimoCierre?.cerrado_at ?? null;
+
+    // 2. Obtener o crear el registro de caja del día
     let cajaResult = await pool.query(
       `SELECT * FROM caja_diaria WHERE fecha = ${MX_TODAY}`
     );
 
     let caja;
     if (cajaResult.rows.length === 0) {
-      // Nuevo día: apertura = monto del último cierre; session_start_at = hora de ese cierre.
-      // Así los valores NO se reinician al cambiar de fecha — solo se reinician al cerrar caja.
-      const anteriorResult = await pool.query(`
-        SELECT
-          COALESCE((SELECT monto      FROM caja_cierres ORDER BY cerrado_at DESC LIMIT 1), 0) AS apertura_valor,
-          (SELECT cerrado_at FROM caja_cierres ORDER BY cerrado_at DESC LIMIT 1)               AS ultimo_cierre_at
-      `);
-      const apertura    = Number(anteriorResult.rows[0]?.apertura_valor || 0);
-      const sessionStart = anteriorResult.rows[0]?.ultimo_cierre_at ?? new Date('2000-01-01');
-
+      const apertura = Number(ultimoCierre?.monto ?? 0);
       const insertResult = await pool.query(
         `INSERT INTO caja_diaria (fecha, caja_chica_apertura, session_start_at)
          VALUES (${MX_TODAY}, $1, $2)
@@ -2053,11 +2050,19 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
       caja = insertResult.rows[0];
     } else {
       caja = cajaResult.rows[0];
+      // Auto-reparar session_start_at si está desincronizado con el último cierre real
+      if (sessionStart && (!caja.session_start_at || sessionStart > caja.session_start_at)) {
+        const updateResult = await pool.query(
+          `UPDATE caja_diaria SET session_start_at = $1 WHERE fecha = ${MX_TODAY} RETURNING *`,
+          [sessionStart]
+        );
+        caja = updateResult.rows[0];
+      }
     }
 
-    // 2. Ventas desde session_start_at — comparación 100% en SQL para evitar
-    //    ambigüedad TIMESTAMP vs TIMESTAMPTZ al pasar fechas por JavaScript.
-    //    Fallback: inicio del día en hora México si session_start_at es NULL.
+    // 3. Ventas desde el último cierre — usando caja_cierres como fuente de verdad
+    //    para evitar que un session_start_at desincronizado en caja_diaria incluya
+    //    órdenes de sesiones anteriores.
     const ventasResult = await pool.query(`
       SELECT
         COUNT(*) AS total_ordenes,
@@ -2067,7 +2072,7 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
       FROM orders
       WHERE status = 'pagado'
         AND paid_at >= COALESCE(
-          (SELECT session_start_at FROM caja_diaria WHERE fecha = ${MX_TODAY}),
+          (SELECT cerrado_at FROM caja_cierres ORDER BY cerrado_at DESC LIMIT 1),
           (${MX_TODAY}::timestamp AT TIME ZONE 'America/Mexico_City' AT TIME ZONE 'UTC')
         )
     `);
@@ -2075,11 +2080,6 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
     const ventas = ventasResult.rows[0];
     const ventasEfectivo = Number(ventas.ventas_efectivo);
     const apertura = Number(caja.caja_chica_apertura);
-
-    // session_start_at para mostrarlo en el frontend
-    const sessionStartAt = caja.session_start_at
-      ? new Date(caja.session_start_at).toISOString()
-      : null;
 
     res.json({
       fecha: caja.fecha,
@@ -2091,7 +2091,7 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
         total_ordenes: Number(ventas.total_ordenes),
       },
       total_en_caja: Number((apertura + ventasEfectivo).toFixed(2)),
-      session_start_at: sessionStartAt,
+      session_start_at: sessionStart ? new Date(sessionStart).toISOString() : null,
     });
   } catch (error) {
     console.error(error);
