@@ -139,6 +139,16 @@ async function logAction(user, accion, detalle = null) {
   }
 }
 
+async function getOrderItemsStr(orderId) {
+  try {
+    const r = await pool.query(
+      `SELECT product_name, SUM(quantity) AS qty FROM order_items WHERE order_id = $1 GROUP BY product_name ORDER BY product_name`,
+      [orderId]
+    );
+    return r.rows.map(i => Number(i.qty) > 1 ? `${i.product_name} x${Number(i.qty)}` : i.product_name).join(', ');
+  } catch { return ''; }
+}
+
 async function isSistemaAbierto() {
   return { abierto: true };
 }
@@ -599,7 +609,9 @@ app.post("/create-admin", async (req, res) => {
       [name, username, hash]
     );
 
-    res.json(result.rows[0]);
+    const newAdmin = result.rows[0];
+    logAction({ id: newAdmin.id, name: newAdmin.name, role: 'admin' }, `Admin creado: ${newAdmin.name}`, `username: ${newAdmin.username}`);
+    res.json(newAdmin);
   } catch (error) {
     console.error(error);
 
@@ -1113,6 +1125,7 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
     await client.query("BEGIN");
 
     let total = 0;
+    const lineItems = [];
 
     const orderResult = await client.query(
       `INSERT INTO orders (waiter_id, status, total, table_number, pickup_name)
@@ -1135,6 +1148,7 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
 
       const product = productResult.rows[0];
       const quantity = Number(item.quantity || 1);
+      lineItems.push(quantity > 1 ? `${product.name} x${quantity}` : product.name);
       let unitPrice = Number(product.price);
 
       // Si el item tiene una opción que varía el precio, usar ese precio
@@ -1197,6 +1211,7 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
       const extraData = extraResult.rows[0];
       const quantity = Number(extra.quantity || 1);
       const unitPrice = Number(extraData.price);
+      lineItems.push(quantity > 1 ? `${extraData.name} x${quantity}` : extraData.name);
 
       total += quantity * unitPrice;
 
@@ -1212,6 +1227,7 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
       if (!custom.name || !String(custom.name).trim()) continue;
       const quantity = Number(custom.quantity || 1);
       const unitPrice = Number(custom.price || 0);
+      lineItems.push(quantity > 1 ? `${String(custom.name).trim()} x${quantity}` : String(custom.name).trim());
       total += quantity * unitPrice;
       await client.query(
         `INSERT INTO order_items
@@ -1232,7 +1248,8 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
 
     const fo = finalOrder.rows[0];
     const ubicacion = fo.table_number != null ? `Mesa ${fo.table_number}` : fo.pickup_name ? `Para llevar · ${fo.pickup_name}` : "Para llevar";
-    logAction(req.user, `Orden #${fo.id} creada`, `${ubicacion} · $${fo.total}`);
+    const itemsResumen = lineItems.join(', ');
+    logAction(req.user, `Orden #${fo.id} creada`, `${ubicacion} · $${fo.total}${itemsResumen ? ` | ${itemsResumen}` : ''}`);
 
     res.json(fo);
   } catch (error) {
@@ -1377,7 +1394,10 @@ app.put("/orders/pay-table/:tableNumber", auth(["admin", "cajero"]), verificarSi
     await client.query("COMMIT");
 
     const ubicacionMesa = isLlevar ? "Para llevar" : `Mesa ${tableNumber}`;
-    logAction(req.user, `${ubicacionMesa} cobrada`, `$${total.toFixed(2)} · ${payment_method}`);
+    const allOrderIds = updatedOrders.map(o => o.id);
+    const itemsTablePago = await Promise.all(allOrderIds.map(oid => getOrderItemsStr(oid)));
+    const itemsTableStr = [...new Set(itemsTablePago.join(', ').split(', ').filter(Boolean))].join(', ');
+    logAction(req.user, `${ubicacionMesa} cobrada`, `$${total.toFixed(2)} · ${payment_method}${itemsTableStr ? ` | ${itemsTableStr}` : ''}`);
 
     res.json({ ok: true, total, cambio: change, orders: updatedOrders });
   } catch (error) {
@@ -1450,7 +1470,8 @@ app.put("/orders/:id/pay", auth(["admin", "cajero"]), verificarSistemaAbierto, a
 
     io.emit("order_paid", result.rows[0]);
     const po = result.rows[0];
-    logAction(req.user, `Orden #${po.id} cobrada`, `$${po.total} · ${payment_method}`);
+    const itemsPago = await getOrderItemsStr(po.id);
+    logAction(req.user, `Orden #${po.id} cobrada`, `$${po.total} · ${payment_method}${itemsPago ? ` | ${itemsPago}` : ''}`);
 
     res.json({
       ...po,
@@ -1656,7 +1677,9 @@ app.put("/orders/:id/complete", auth(["admin", "barista"]), verificarSistemaAbie
 
     io.emit("order_completed", result.rows[0]);
     const co = result.rows[0];
-    logAction(req.user, `Orden #${co.id} completada`, co.table_number != null ? `Mesa ${co.table_number}` : "Para llevar");
+    const itemsCompletada = items.rows.map(i => i.product_name).join(', ');
+    const ubicacionCo = co.table_number != null ? `Mesa ${co.table_number}` : "Para llevar";
+    logAction(req.user, `Orden #${co.id} completada`, `${ubicacionCo}${itemsCompletada ? ` | ${itemsCompletada}` : ''}`);
 
     res.json(co);
   } catch (error) {
@@ -1691,7 +1714,9 @@ app.put("/orders/:id/reopen", auth(["admin", "cajero"]), verificarSistemaAbierto
 
     io.emit("order_reopened", result.rows[0]);
     const ro = result.rows[0];
-    logAction(req.user, `Orden #${ro.id} devuelta al barista`, ro.table_number != null ? `Mesa ${ro.table_number}` : "Para llevar");
+    const itemsReopen = await getOrderItemsStr(ro.id);
+    const ubicacionRo = ro.table_number != null ? `Mesa ${ro.table_number}` : "Para llevar";
+    logAction(req.user, `Orden #${ro.id} devuelta al barista`, `${ubicacionRo}${itemsReopen ? ` | ${itemsReopen}` : ''}`);
 
     res.json(ro);
   } catch (error) {
@@ -1774,7 +1799,9 @@ app.put("/orders/:id/cancel", auth(["admin", "mesero", "cajero"]), async (req, r
 
     io.emit("order_cancelled", result.rows[0]);
     const xo = result.rows[0];
-    logAction(req.user, `Orden #${xo.id} cancelada`, xo.table_number != null ? `Mesa ${xo.table_number}` : "Para llevar");
+    const itemsCancelada = await getOrderItemsStr(xo.id);
+    const ubicacionXo = xo.table_number != null ? `Mesa ${xo.table_number}` : "Para llevar";
+    logAction(req.user, `Orden #${xo.id} cancelada`, `${ubicacionXo} · $${xo.total}${itemsCancelada ? ` | ${itemsCancelada}` : ''}`);
     res.json(xo);
   } catch (error) {
     console.error(error);
@@ -2173,10 +2200,10 @@ app.get("/fix-caja-cierres", async (req, res) => {
 
 app.get("/bitacora", auth(["admin"]), async (req, res) => {
   try {
-    const { limit = 200 } = req.query;
+    const { limit = 500 } = req.query;
     const result = await pool.query(
       `SELECT * FROM bitacora ORDER BY created_at DESC LIMIT $1`,
-      [Number(limit)]
+      [Math.min(Number(limit), 2000)]
     );
     res.json(result.rows);
   } catch (error) {
