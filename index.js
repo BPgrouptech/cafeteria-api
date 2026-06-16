@@ -1839,8 +1839,12 @@ app.get("/orders/history", auth(["admin"]), async (req, res) => {
       conditions.push(`EXTRACT(MONTH FROM o.created_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
     }
 
-    if (week === "true") {
-      conditions.push(`DATE_TRUNC('week', o.created_at AT TIME ZONE 'America/Mexico_City') = DATE_TRUNC('week', NOW() AT TIME ZONE 'America/Mexico_City')`);
+    if (week) {
+      const m = String(week).match(/^(\d{4})-W(\d{1,2})$/);
+      if (m) {
+        params.push(Number(m[1]), Number(m[2]));
+        conditions.push(`EXTRACT(ISOYEAR FROM o.created_at AT TIME ZONE 'America/Mexico_City') = $${params.length - 1} AND EXTRACT(WEEK FROM o.created_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
+      }
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -1896,8 +1900,12 @@ app.get("/ventas/resumen", auth(["admin"]), async (req, res) => {
       conditions.push(`EXTRACT(MONTH FROM o.paid_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
     }
 
-    if (week === "true") {
-      conditions.push(`DATE_TRUNC('week', o.paid_at AT TIME ZONE 'America/Mexico_City') = DATE_TRUNC('week', NOW() AT TIME ZONE 'America/Mexico_City')`);
+    if (week) {
+      const m = String(week).match(/^(\d{4})-W(\d{1,2})$/);
+      if (m) {
+        params.push(Number(m[1]), Number(m[2]));
+        conditions.push(`EXTRACT(ISOYEAR FROM o.paid_at AT TIME ZONE 'America/Mexico_City') = $${params.length - 1} AND EXTRACT(WEEK FROM o.paid_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
+      }
     }
 
     const where = `WHERE ${conditions.join(" AND ")}`;
@@ -2229,8 +2237,12 @@ app.get("/gastos", auth(["admin"]), async (req, res) => {
       params.push(Number(month));
       conditions.push(`EXTRACT(MONTH FROM g.created_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
     }
-    if (week === "true") {
-      conditions.push(`DATE_TRUNC('week', g.created_at AT TIME ZONE 'America/Mexico_City') = DATE_TRUNC('week', NOW() AT TIME ZONE 'America/Mexico_City')`);
+    if (week) {
+      const m = String(week).match(/^(\d{4})-W(\d{1,2})$/);
+      if (m) {
+        params.push(Number(m[1]), Number(m[2]));
+        conditions.push(`EXTRACT(ISOYEAR FROM g.created_at AT TIME ZONE 'America/Mexico_City') = $${params.length - 1} AND EXTRACT(WEEK FROM g.created_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
+      }
     }
 
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
