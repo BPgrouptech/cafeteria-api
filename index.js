@@ -1824,7 +1824,7 @@ app.put("/orders/:id/cancel", auth(["admin", "mesero", "cajero"]), async (req, r
 
 app.get("/orders/history", auth(["admin"]), async (req, res) => {
   try {
-    const { month, year } = req.query;
+    const { month, year, week } = req.query;
 
     const conditions = [];
     const params = [];
@@ -1837,6 +1837,10 @@ app.get("/orders/history", auth(["admin"]), async (req, res) => {
     if (month) {
       params.push(Number(month));
       conditions.push(`EXTRACT(MONTH FROM o.created_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
+    }
+
+    if (week === "true") {
+      conditions.push(`DATE_TRUNC('week', o.created_at AT TIME ZONE 'America/Mexico_City') = DATE_TRUNC('week', NOW() AT TIME ZONE 'America/Mexico_City')`);
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -1877,7 +1881,7 @@ app.get("/orders/history", auth(["admin"]), async (req, res) => {
 
 app.get("/ventas/resumen", auth(["admin"]), async (req, res) => {
   try {
-    const { month, year } = req.query;
+    const { month, year, week } = req.query;
 
     const conditions = ["o.status = 'pagado'"];
     const params = [];
@@ -1890,6 +1894,10 @@ app.get("/ventas/resumen", auth(["admin"]), async (req, res) => {
     if (month) {
       params.push(Number(month));
       conditions.push(`EXTRACT(MONTH FROM o.paid_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
+    }
+
+    if (week === "true") {
+      conditions.push(`DATE_TRUNC('week', o.paid_at AT TIME ZONE 'America/Mexico_City') = DATE_TRUNC('week', NOW() AT TIME ZONE 'America/Mexico_City')`);
     }
 
     const where = `WHERE ${conditions.join(" AND ")}`;
