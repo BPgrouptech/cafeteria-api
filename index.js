@@ -127,6 +127,18 @@ pool.query(`
   ALTER TABLE IF EXISTS caja_diaria ADD COLUMN IF NOT EXISTS session_start_at TIMESTAMP
 `).catch((e) => console.error("Error migrando session_start_at:", e.message));
 
+pool.query(`
+  CREATE TABLE IF NOT EXISTS gastos (
+    id SERIAL PRIMARY KEY,
+    nombre TEXT NOT NULL,
+    descripcion TEXT,
+    valor NUMERIC(10,2) NOT NULL,
+    created_by INTEGER REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+  )
+`).catch((e) => console.error("Error creando tabla gastos:", e.message));
+
 async function logAction(user, accion, detalle = null) {
   try {
     await pool.query(
@@ -2091,23 +2103,33 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
     // 3. Ventas desde el último cierre — usando caja_cierres como fuente de verdad
     //    para evitar que un session_start_at desincronizado en caja_diaria incluya
     //    órdenes de sesiones anteriores.
-    const ventasResult = await pool.query(`
-      SELECT
-        COUNT(*) AS total_ordenes,
-        COALESCE(SUM(total), 0) AS total_ventas,
-        COALESCE(SUM(CASE WHEN payment_method = 'efectivo' THEN total ELSE 0 END), 0) AS ventas_efectivo,
-        COALESCE(SUM(CASE WHEN payment_method = 'tarjeta' THEN total ELSE 0 END), 0) AS ventas_tarjeta
-      FROM orders
-      WHERE status = 'pagado'
-        AND paid_at >= COALESCE(
+    const sessionRef = `COALESCE(
           (SELECT cerrado_at FROM caja_cierres ORDER BY cerrado_at DESC LIMIT 1),
           (${MX_TODAY}::timestamp AT TIME ZONE 'America/Mexico_City' AT TIME ZONE 'UTC')
-        )
-    `);
+        )`;
+
+    const [ventasResult, gastosResult] = await Promise.all([
+      pool.query(`
+        SELECT
+          COUNT(*) AS total_ordenes,
+          COALESCE(SUM(total), 0) AS total_ventas,
+          COALESCE(SUM(CASE WHEN payment_method = 'efectivo' THEN total ELSE 0 END), 0) AS ventas_efectivo,
+          COALESCE(SUM(CASE WHEN payment_method = 'tarjeta' THEN total ELSE 0 END), 0) AS ventas_tarjeta
+        FROM orders
+        WHERE status = 'pagado'
+          AND paid_at >= ${sessionRef}
+      `),
+      pool.query(`
+        SELECT COUNT(*) AS total_gastos, COALESCE(SUM(valor), 0) AS total_valor
+        FROM gastos
+        WHERE created_at >= ${sessionRef}
+      `),
+    ]);
 
     const ventas = ventasResult.rows[0];
     const ventasEfectivo = Number(ventas.ventas_efectivo);
     const apertura = Number(caja.caja_chica_apertura);
+    const gastosTotal = Number(gastosResult.rows[0].total_valor);
 
     res.json({
       fecha: caja.fecha,
@@ -2118,7 +2140,11 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
         total: Number(ventas.total_ventas),
         total_ordenes: Number(ventas.total_ordenes),
       },
-      total_en_caja: Number((apertura + ventasEfectivo).toFixed(2)),
+      gastos: {
+        total: gastosTotal,
+        count: Number(gastosResult.rows[0].total_gastos),
+      },
+      total_en_caja: Number((apertura + ventasEfectivo - gastosTotal).toFixed(2)),
       session_start_at: sessionStart ? new Date(sessionStart).toISOString() : null,
     });
   } catch (error) {
@@ -2177,6 +2203,131 @@ app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error cerrando caja" });
+  }
+});
+
+// ─── Gastos ───────────────────────────────────────────────────────────────────
+app.get("/gastos", auth(["admin"]), async (req, res) => {
+  try {
+    const { year, month, week } = req.query;
+    const conditions = [];
+    const params = [];
+
+    if (year) {
+      params.push(Number(year));
+      conditions.push(`EXTRACT(YEAR FROM g.created_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
+    }
+    if (month) {
+      params.push(Number(month));
+      conditions.push(`EXTRACT(MONTH FROM g.created_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
+    }
+    if (week === "true") {
+      conditions.push(`DATE_TRUNC('week', g.created_at AT TIME ZONE 'America/Mexico_City') = DATE_TRUNC('week', NOW() AT TIME ZONE 'America/Mexico_City')`);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const result = await pool.query(`
+      SELECT g.*, u.name AS created_by_name
+      FROM gastos g
+      LEFT JOIN users u ON u.id = g.created_by
+      ${where}
+      ORDER BY g.created_at DESC
+    `, params);
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error obteniendo gastos" });
+  }
+});
+
+app.post("/gastos", auth(["admin", "cajero"]), async (req, res) => {
+  try {
+    const { nombre, descripcion, valor } = req.body;
+    if (!nombre || !valor) {
+      return res.status(400).json({ error: "Nombre y valor son requeridos" });
+    }
+    const num = Number(valor);
+    if (isNaN(num) || num <= 0) {
+      return res.status(400).json({ error: "El valor debe ser un número positivo" });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO gastos (nombre, descripcion, valor, created_by)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [nombre.trim(), descripcion?.trim() || null, num, req.user.id]
+    );
+
+    io.emit("gasto_created", result.rows[0]);
+    logAction(req.user, "Gasto registrado", `${nombre} · $${num.toFixed(2)}${descripcion ? ` | ${descripcion}` : ""}`);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error registrando gasto" });
+  }
+});
+
+app.put("/gastos/:id", auth(["admin"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nombre, descripcion, valor } = req.body;
+    if (!nombre || !valor) {
+      return res.status(400).json({ error: "Nombre y valor son requeridos" });
+    }
+    const num = Number(valor);
+    if (isNaN(num) || num <= 0) {
+      return res.status(400).json({ error: "El valor debe ser un número positivo" });
+    }
+
+    const result = await pool.query(
+      `UPDATE gastos SET nombre = $1, descripcion = $2, valor = $3, updated_at = NOW()
+       WHERE id = $4 RETURNING *`,
+      [nombre.trim(), descripcion?.trim() || null, num, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Gasto no encontrado" });
+    }
+
+    io.emit("gasto_updated", result.rows[0]);
+    logAction(req.user, `Gasto #${id} modificado`, `${nombre} · $${num.toFixed(2)}`);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error modificando gasto" });
+  }
+});
+
+app.delete("/gastos/:id", auth(["admin"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { password } = req.body;
+
+    if (!password) {
+      return res.status(400).json({ error: "Contraseña requerida" });
+    }
+
+    const userResult = await pool.query("SELECT * FROM users WHERE id = $1", [req.user.id]);
+    const valid = await bcrypt.compare(password, userResult.rows[0].password_hash);
+    if (!valid) {
+      return res.status(401).json({ error: "Contraseña incorrecta" });
+    }
+
+    const gastoInfo = await pool.query("SELECT * FROM gastos WHERE id = $1", [id]);
+    const result = await pool.query("DELETE FROM gastos WHERE id = $1 RETURNING id", [id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Gasto no encontrado" });
+    }
+
+    const g = gastoInfo.rows[0];
+    io.emit("gasto_deleted", { id: Number(id) });
+    logAction(req.user, `Gasto #${id} eliminado`, `${g?.nombre} · $${g?.valor}`);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error eliminando gasto" });
   }
 });
 
