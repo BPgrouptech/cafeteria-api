@@ -1758,6 +1758,7 @@ app.delete("/orders/:id", auth(["admin"]), async (req, res) => {
     const info = orderInfo.rows[0];
     const ubicacion = info?.table_number != null ? `Mesa ${info.table_number}` : "Para llevar";
     logAction(req.user, `Orden #${id} eliminada del historial`, `estado: ${info?.status} · ${ubicacion} · $${info?.total}`);
+    io.emit("order_deleted", { id: Number(id), status: info?.status });
     res.json({ ok: true });
   } catch (error) {
     console.error(error);
