@@ -147,10 +147,7 @@ pool.query(`
     nota TEXT,
     created_by INTEGER REFERENCES users(id),
     created_at TIMESTAMP DEFAULT NOW()
-  )
-`).catch((e) => console.error("Error creando tabla credito_contactos:", e.message));
-
-pool.query(`
+  );
   CREATE TABLE IF NOT EXISTS creditos (
     id SERIAL PRIMARY KEY,
     contacto_id INTEGER NOT NULL REFERENCES credito_contactos(id),
@@ -162,15 +159,12 @@ pool.query(`
     paid_by INTEGER REFERENCES users(id),
     created_at TIMESTAMP DEFAULT NOW(),
     paid_at TIMESTAMP
-  )
-`).catch((e) => console.error("Error creando tabla creditos:", e.message));
-
-pool.query(`
+  );
   ALTER TABLE orders ADD COLUMN IF NOT EXISTS contacto_id INTEGER REFERENCES credito_contactos(id);
   ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_payment_method_check;
   ALTER TABLE orders ADD CONSTRAINT orders_payment_method_check
     CHECK (payment_method IN ('efectivo', 'tarjeta', 'credito'));
-`).catch((e) => console.error("Error migrando orders para credito:", e.message));
+`).catch((e) => console.error("Error creando tablas de credito:", e.message));
 
 async function logAction(user, accion, detalle = null) {
   try {
