@@ -139,6 +139,39 @@ pool.query(`
   )
 `).catch((e) => console.error("Error creando tabla gastos:", e.message));
 
+pool.query(`
+  CREATE TABLE IF NOT EXISTS credito_contactos (
+    id SERIAL PRIMARY KEY,
+    nombre TEXT NOT NULL,
+    telefono TEXT,
+    nota TEXT,
+    created_by INTEGER REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT NOW()
+  )
+`).catch((e) => console.error("Error creando tabla credito_contactos:", e.message));
+
+pool.query(`
+  CREATE TABLE IF NOT EXISTS creditos (
+    id SERIAL PRIMARY KEY,
+    contacto_id INTEGER NOT NULL REFERENCES credito_contactos(id),
+    order_id INTEGER REFERENCES orders(id),
+    monto NUMERIC(10,2) NOT NULL,
+    status TEXT NOT NULL DEFAULT 'activo' CHECK (status IN ('activo', 'pagado')),
+    payment_method TEXT CHECK (payment_method IN ('efectivo', 'tarjeta')),
+    amount_paid NUMERIC(10,2),
+    paid_by INTEGER REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT NOW(),
+    paid_at TIMESTAMP
+  )
+`).catch((e) => console.error("Error creando tabla creditos:", e.message));
+
+pool.query(`
+  ALTER TABLE orders ADD COLUMN IF NOT EXISTS contacto_id INTEGER REFERENCES credito_contactos(id);
+  ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_payment_method_check;
+  ALTER TABLE orders ADD CONSTRAINT orders_payment_method_check
+    CHECK (payment_method IN ('efectivo', 'tarjeta', 'credito'));
+`).catch((e) => console.error("Error migrando orders para credito:", e.message));
+
 async function logAction(user, accion, detalle = null) {
   try {
     await pool.query(
@@ -1353,11 +1386,15 @@ app.put("/orders/pay-table/:tableNumber", auth(["admin", "cajero"]), verificarSi
   const client = await pool.connect();
   try {
     const { tableNumber } = req.params;
-    const { payment_method, amount_paid } = req.body;
+    const { payment_method, amount_paid, contacto_id } = req.body;
     const isLlevar = tableNumber === "llevar";
 
-    if (!["efectivo", "tarjeta"].includes(payment_method)) {
+    if (!["efectivo", "tarjeta", "credito"].includes(payment_method)) {
       return res.status(400).json({ error: "Método de pago inválido" });
+    }
+
+    if (payment_method === "credito" && !contacto_id) {
+      return res.status(400).json({ error: "Debes seleccionar un contacto para cobrar a crédito" });
     }
 
     const ordersResult = await client.query(
@@ -1395,12 +1432,23 @@ app.put("/orders/pay-table/:tableNumber", auth(["admin", "cajero"]), verificarSi
       const result = await client.query(
         `UPDATE orders
          SET status = 'pagado', paid_at = NOW(),
-             payment_method = $2, amount_paid = $3, change_given = $4
+             payment_method = $2, amount_paid = $3, change_given = $4, contacto_id = $5
          WHERE id = $1 RETURNING *`,
-        [order.id, payment_method, Number(order.total), 0]
+        [order.id, payment_method, payment_method === "credito" ? 0 : Number(order.total), 0, contacto_id || null]
       );
       updatedOrders.push(result.rows[0]);
       io.emit("order_paid", result.rows[0]);
+    }
+
+    if (payment_method === "credito") {
+      const contacto = await client.query("SELECT nombre FROM credito_contactos WHERE id = $1", [contacto_id]);
+      for (const order of updatedOrders) {
+        await client.query(
+          `INSERT INTO creditos (contacto_id, order_id, monto, status) VALUES ($1, $2, $3, 'activo')`,
+          [contacto_id, order.id, Number(order.total)]
+        );
+      }
+      io.emit("credito_cobrado", { contacto_id, contacto_nombre: contacto.rows[0]?.nombre, total });
     }
 
     await client.query("COMMIT");
@@ -1409,7 +1457,7 @@ app.put("/orders/pay-table/:tableNumber", auth(["admin", "cajero"]), verificarSi
     const allOrderIds = updatedOrders.map(o => o.id);
     const itemsTablePago = await Promise.all(allOrderIds.map(oid => getOrderItemsStr(oid)));
     const itemsTableStr = [...new Set(itemsTablePago.join(', ').split(', ').filter(Boolean))].join(', ');
-    logAction(req.user, `${ubicacionMesa} cobrada`, `$${total.toFixed(2)} · ${payment_method}${itemsTableStr ? ` | ${itemsTableStr}` : ''}`);
+    logAction(req.user, `${ubicacionMesa} cobrada`, `$${total.toFixed(2)} · ${payment_method}${payment_method === "credito" ? ` (contacto #${contacto_id})` : ""}${itemsTableStr ? ` | ${itemsTableStr}` : ''}`);
 
     res.json({ ok: true, total, cambio: change, orders: updatedOrders });
   } catch (error) {
@@ -1424,10 +1472,14 @@ app.put("/orders/pay-table/:tableNumber", auth(["admin", "cajero"]), verificarSi
 app.put("/orders/:id/pay", auth(["admin", "cajero"]), verificarSistemaAbierto, async (req, res) => {
   try {
     const { id } = req.params;
-    const { payment_method, amount_paid } = req.body;
+    const { payment_method, amount_paid, contacto_id } = req.body;
 
-    if (!["efectivo", "tarjeta"].includes(payment_method)) {
-      return res.status(400).json({ error: "Método de pago inválido. Usa 'efectivo' o 'tarjeta'" });
+    if (!["efectivo", "tarjeta", "credito"].includes(payment_method)) {
+      return res.status(400).json({ error: "Método de pago inválido. Usa 'efectivo', 'tarjeta' o 'credito'" });
+    }
+
+    if (payment_method === "credito" && !contacto_id) {
+      return res.status(400).json({ error: "Debes seleccionar un contacto para cobrar a crédito" });
     }
 
     const orderResult = await pool.query(
@@ -1449,41 +1501,44 @@ app.put("/orders/:id/pay", auth(["admin", "cajero"]), verificarSistemaAbierto, a
       if (amount_paid === undefined || amount_paid === null) {
         return res.status(400).json({ error: "Con efectivo debes enviar el monto recibido (amount_paid)" });
       }
-
       paid = Number(amount_paid);
-
       if (isNaN(paid) || paid < 0) {
         return res.status(400).json({ error: "Monto recibido inválido" });
       }
-
       if (paid < total) {
         return res.status(400).json({
           error: "El monto recibido es menor al total",
-          total,
-          amount_paid: paid,
+          total, amount_paid: paid,
           faltante: Number((total - paid).toFixed(2)),
         });
       }
-
       change = Number((paid - total).toFixed(2));
     }
 
+    if (payment_method === "credito") { paid = 0; change = 0; }
+
     const result = await pool.query(
       `UPDATE orders
-       SET status = 'pagado',
-           paid_at = NOW(),
-           payment_method = $2,
-           amount_paid = $3,
-           change_given = $4
-       WHERE id = $1
-       RETURNING *`,
-      [id, payment_method, paid, change]
+       SET status = 'pagado', paid_at = NOW(),
+           payment_method = $2, amount_paid = $3, change_given = $4, contacto_id = $5
+       WHERE id = $1 RETURNING *`,
+      [id, payment_method, paid, change, contacto_id || null]
     );
 
-    io.emit("order_paid", result.rows[0]);
     const po = result.rows[0];
+
+    if (payment_method === "credito") {
+      const contacto = await pool.query("SELECT nombre FROM credito_contactos WHERE id = $1", [contacto_id]);
+      await pool.query(
+        `INSERT INTO creditos (contacto_id, order_id, monto, status) VALUES ($1, $2, $3, 'activo')`,
+        [contacto_id, po.id, total]
+      );
+      io.emit("credito_cobrado", { contacto_id, contacto_nombre: contacto.rows[0]?.nombre, total });
+    }
+
+    io.emit("order_paid", po);
     const itemsPago = await getOrderItemsStr(po.id);
-    logAction(req.user, `Orden #${po.id} cobrada`, `$${po.total} · ${payment_method}${itemsPago ? ` | ${itemsPago}` : ''}`);
+    logAction(req.user, `Orden #${po.id} cobrada`, `$${po.total} · ${payment_method}${payment_method === "credito" ? ` (contacto #${contacto_id})` : ""}${itemsPago ? ` | ${itemsPago}` : ''}`);
 
     res.json({
       ...po,
@@ -2124,13 +2179,14 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
           (${MX_TODAY}::timestamp AT TIME ZONE 'America/Mexico_City' AT TIME ZONE 'UTC')
         )`;
 
-    const [ventasResult, gastosResult] = await Promise.all([
+    const [ventasResult, gastosResult, creditosPagadosResult, creditosActivosResult] = await Promise.all([
       pool.query(`
         SELECT
           COUNT(*) AS total_ordenes,
-          COALESCE(SUM(total), 0) AS total_ventas,
+          COALESCE(SUM(CASE WHEN payment_method != 'credito' THEN total ELSE 0 END), 0) AS total_ventas,
           COALESCE(SUM(CASE WHEN payment_method = 'efectivo' THEN total ELSE 0 END), 0) AS ventas_efectivo,
-          COALESCE(SUM(CASE WHEN payment_method = 'tarjeta' THEN total ELSE 0 END), 0) AS ventas_tarjeta
+          COALESCE(SUM(CASE WHEN payment_method = 'tarjeta' THEN total ELSE 0 END), 0) AS ventas_tarjeta,
+          COALESCE(SUM(CASE WHEN payment_method = 'credito' THEN total ELSE 0 END), 0) AS vendido_a_credito
         FROM orders
         WHERE status = 'pagado'
           AND paid_at >= ${sessionRef}
@@ -2140,10 +2196,28 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
         FROM gastos
         WHERE created_at >= ${sessionRef}
       `),
+      pool.query(`
+        SELECT
+          COALESCE(SUM(CASE WHEN payment_method = 'efectivo' THEN monto ELSE 0 END), 0) AS efectivo,
+          COALESCE(SUM(CASE WHEN payment_method = 'tarjeta' THEN monto ELSE 0 END), 0) AS tarjeta,
+          COALESCE(SUM(monto), 0) AS total,
+          COUNT(*) AS count
+        FROM creditos
+        WHERE status = 'pagado'
+          AND paid_at >= ${sessionRef}
+      `),
+      pool.query(`
+        SELECT COALESCE(SUM(monto), 0) AS total, COUNT(*) AS count
+        FROM creditos
+        WHERE status = 'activo'
+      `),
     ]);
 
     const ventas = ventasResult.rows[0];
-    const ventasEfectivo = Number(ventas.ventas_efectivo);
+    const cp = creditosPagadosResult.rows[0];
+    const ca = creditosActivosResult.rows[0];
+    const ventasEfectivo = Number(ventas.ventas_efectivo) + Number(cp.efectivo);
+    const ventasTarjeta = Number(ventas.ventas_tarjeta) + Number(cp.tarjeta);
     const apertura = Number(caja.caja_chica_apertura);
     const gastosTotal = Number(gastosResult.rows[0].total_valor);
 
@@ -2152,13 +2226,20 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
       caja_chica_apertura: apertura,
       ventas: {
         efectivo: ventasEfectivo,
-        tarjeta: Number(ventas.ventas_tarjeta),
-        total: Number(ventas.total_ventas),
+        tarjeta: ventasTarjeta,
+        total: Number(ventas.total_ventas) + Number(cp.total),
         total_ordenes: Number(ventas.total_ordenes),
+        vendido_a_credito: Number(ventas.vendido_a_credito),
       },
       gastos: {
         total: gastosTotal,
         count: Number(gastosResult.rows[0].total_gastos),
+      },
+      creditos: {
+        pendientes_total: Number(ca.total),
+        pendientes_count: Number(ca.count),
+        cobrados_hoy: Number(cp.total),
+        cobrados_hoy_count: Number(cp.count),
       },
       total_en_caja: Number((apertura + ventasEfectivo - gastosTotal).toFixed(2)),
       session_start_at: sessionStart ? new Date(sessionStart).toISOString() : null,
@@ -2348,6 +2429,151 @@ app.delete("/gastos/:id", auth(["admin"]), async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error eliminando gasto" });
+  }
+});
+
+// ─── Créditos ─────────────────────────────────────────────────────────────────
+app.get("/credito/contactos", auth(["admin", "cajero"]), async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT cc.*,
+        u.name AS created_by_name,
+        COALESCE(SUM(CASE WHEN c.status = 'activo' THEN c.monto ELSE 0 END), 0) AS deuda_activa,
+        COUNT(CASE WHEN c.status = 'activo' THEN 1 END)::int AS creditos_activos
+      FROM credito_contactos cc
+      LEFT JOIN users u ON u.id = cc.created_by
+      LEFT JOIN creditos c ON c.contacto_id = cc.id
+      GROUP BY cc.id, u.name
+      ORDER BY cc.nombre
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error obteniendo contactos" });
+  }
+});
+
+app.post("/credito/contactos", auth(["admin", "cajero"]), async (req, res) => {
+  try {
+    const { nombre, telefono, nota } = req.body;
+    if (!nombre?.trim()) return res.status(400).json({ error: "El nombre es requerido" });
+    const result = await pool.query(
+      `INSERT INTO credito_contactos (nombre, telefono, nota, created_by) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [nombre.trim(), telefono?.trim() || null, nota?.trim() || null, req.user.id]
+    );
+    logAction(req.user, "Contacto de crédito creado", `${nombre}${telefono ? ` · ${telefono}` : ""}`);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error creando contacto" });
+  }
+});
+
+app.get("/credito/contactos/:id", auth(["admin", "cajero"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [contacto, creditos] = await Promise.all([
+      pool.query("SELECT * FROM credito_contactos WHERE id = $1", [id]),
+      pool.query(`
+        SELECT c.*, o.table_number, o.created_at AS order_fecha,
+               u.name AS paid_by_name
+        FROM creditos c
+        LEFT JOIN orders o ON o.id = c.order_id
+        LEFT JOIN users u ON u.id = c.paid_by
+        WHERE c.contacto_id = $1
+        ORDER BY c.created_at DESC
+      `, [id]),
+    ]);
+    if (contacto.rows.length === 0) return res.status(404).json({ error: "Contacto no encontrado" });
+    res.json({ ...contacto.rows[0], creditos: creditos.rows });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error obteniendo contacto" });
+  }
+});
+
+app.put("/credito/contactos/:id", auth(["admin"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nombre, telefono, nota } = req.body;
+    if (!nombre?.trim()) return res.status(400).json({ error: "El nombre es requerido" });
+    const result = await pool.query(
+      `UPDATE credito_contactos SET nombre = $1, telefono = $2, nota = $3 WHERE id = $4 RETURNING *`,
+      [nombre.trim(), telefono?.trim() || null, nota?.trim() || null, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: "Contacto no encontrado" });
+    logAction(req.user, `Contacto de crédito #${id} modificado`, nombre);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error modificando contacto" });
+  }
+});
+
+app.delete("/credito/contactos/:id", auth(["admin"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { password } = req.body;
+    if (!password) return res.status(400).json({ error: "Contraseña requerida" });
+    const userResult = await pool.query("SELECT * FROM users WHERE id = $1", [req.user.id]);
+    const valid = await bcrypt.compare(password, userResult.rows[0].password_hash);
+    if (!valid) return res.status(401).json({ error: "Contraseña incorrecta" });
+    const activos = await pool.query("SELECT COUNT(*) FROM creditos WHERE contacto_id = $1 AND status = 'activo'", [id]);
+    if (Number(activos.rows[0].count) > 0) {
+      return res.status(400).json({ error: "No puedes eliminar un contacto con créditos activos" });
+    }
+    const info = await pool.query("SELECT nombre FROM credito_contactos WHERE id = $1", [id]);
+    await pool.query("DELETE FROM credito_contactos WHERE id = $1", [id]);
+    logAction(req.user, `Contacto de crédito eliminado`, info.rows[0]?.nombre);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error eliminando contacto" });
+  }
+});
+
+app.put("/credito/:id/pagar", auth(["admin", "cajero"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { payment_method, amount_paid } = req.body;
+    if (!["efectivo", "tarjeta"].includes(payment_method)) {
+      return res.status(400).json({ error: "Método de pago inválido" });
+    }
+    const creditoResult = await pool.query(
+      "SELECT c.*, cc.nombre AS contacto_nombre FROM creditos c JOIN credito_contactos cc ON cc.id = c.contacto_id WHERE c.id = $1 AND c.status = 'activo'",
+      [id]
+    );
+    if (creditoResult.rows.length === 0) {
+      return res.status(404).json({ error: "Crédito no encontrado o ya está pagado" });
+    }
+    const credito = creditoResult.rows[0];
+    const monto = Number(credito.monto);
+    if (payment_method === "efectivo") {
+      const pagado = Number(amount_paid);
+      if (isNaN(pagado) || pagado < monto) {
+        return res.status(400).json({ error: "Monto insuficiente", monto, faltante: Number((monto - pagado).toFixed(2)) });
+      }
+    }
+    const result = await pool.query(
+      `UPDATE creditos SET status = 'pagado', payment_method = $2, amount_paid = $3, paid_by = $4, paid_at = NOW()
+       WHERE id = $1 RETURNING *`,
+      [id, payment_method, Number(amount_paid) || monto, req.user.id]
+    );
+    const notif = {
+      credito_id: Number(id),
+      contacto_id: credito.contacto_id,
+      contacto_nombre: credito.contacto_nombre,
+      monto,
+      payment_method,
+      cajero_nombre: req.user.name,
+      paid_at: result.rows[0].paid_at,
+    };
+    io.emit("credito_pagado", notif);
+    logAction(req.user, `Crédito #${id} cobrado`, `${credito.contacto_nombre} · $${monto.toFixed(2)} · ${payment_method}`);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error cobrando crédito" });
   }
 });
 
