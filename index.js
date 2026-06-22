@@ -2235,7 +2235,7 @@ app.get("/caja/hoy", auth(["admin", "cajero"]), async (req, res) => {
         cobrados_hoy: Number(cp.total),
         cobrados_hoy_count: Number(cp.count),
       },
-      total_en_caja: Number((apertura + ventasEfectivo - gastosTotal).toFixed(2)),
+      total_en_caja: Number((apertura + ventasEfectivo).toFixed(2)),
       session_start_at: sessionStart ? new Date(sessionStart).toISOString() : null,
     });
   } catch (error) {
@@ -2298,7 +2298,7 @@ app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
 });
 
 // ─── Gastos ───────────────────────────────────────────────────────────────────
-app.get("/gastos", auth(["admin"]), async (req, res) => {
+app.get("/gastos", auth(["admin", "cajero"]), async (req, res) => {
   try {
     const { year, month, week } = req.query;
     const conditions = [];
