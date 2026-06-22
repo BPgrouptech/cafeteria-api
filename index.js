@@ -1873,7 +1873,7 @@ app.put("/orders/:id/cancel", auth(["admin", "mesero", "cajero"]), async (req, r
 
 app.get("/orders/history", auth(["admin"]), async (req, res) => {
   try {
-    const { month, year, week } = req.query;
+    const { month, year, week, week_start } = req.query;
 
     const conditions = [];
     const params = [];
@@ -1888,7 +1888,10 @@ app.get("/orders/history", auth(["admin"]), async (req, res) => {
       conditions.push(`EXTRACT(MONTH FROM o.created_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
     }
 
-    if (week) {
+    if (week_start) {
+      params.push(week_start);
+      conditions.push(`(o.created_at AT TIME ZONE 'America/Mexico_City')::date >= $${params.length}::date AND (o.created_at AT TIME ZONE 'America/Mexico_City')::date < $${params.length}::date + 7`);
+    } else if (week) {
       const m = String(week).match(/^(\d{4})-W(\d{1,2})$/);
       if (m) {
         params.push(Number(m[1]), Number(m[2]));
@@ -1934,7 +1937,7 @@ app.get("/orders/history", auth(["admin"]), async (req, res) => {
 
 app.get("/ventas/resumen", auth(["admin"]), async (req, res) => {
   try {
-    const { month, year, week } = req.query;
+    const { month, year, week, week_start } = req.query;
 
     const conditions = ["o.status = 'pagado'"];
     const params = [];
@@ -1949,7 +1952,10 @@ app.get("/ventas/resumen", auth(["admin"]), async (req, res) => {
       conditions.push(`EXTRACT(MONTH FROM o.paid_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
     }
 
-    if (week) {
+    if (week_start) {
+      params.push(week_start);
+      conditions.push(`(o.paid_at AT TIME ZONE 'America/Mexico_City')::date >= $${params.length}::date AND (o.paid_at AT TIME ZONE 'America/Mexico_City')::date < $${params.length}::date + 7`);
+    } else if (week) {
       const m = String(week).match(/^(\d{4})-W(\d{1,2})$/);
       if (m) {
         params.push(Number(m[1]), Number(m[2]));
@@ -2300,7 +2306,7 @@ app.post("/caja/cerrar", auth(["admin"]), async (req, res) => {
 // ─── Gastos ───────────────────────────────────────────────────────────────────
 app.get("/gastos", auth(["admin", "cajero"]), async (req, res) => {
   try {
-    const { year, month, week } = req.query;
+    const { year, month, week, week_start } = req.query;
     const conditions = [];
     const params = [];
 
@@ -2312,7 +2318,10 @@ app.get("/gastos", auth(["admin", "cajero"]), async (req, res) => {
       params.push(Number(month));
       conditions.push(`EXTRACT(MONTH FROM g.created_at AT TIME ZONE 'America/Mexico_City') = $${params.length}`);
     }
-    if (week) {
+    if (week_start) {
+      params.push(week_start);
+      conditions.push(`(g.created_at AT TIME ZONE 'America/Mexico_City')::date >= $${params.length}::date AND (g.created_at AT TIME ZONE 'America/Mexico_City')::date < $${params.length}::date + 7`);
+    } else if (week) {
       const m = String(week).match(/^(\d{4})-W(\d{1,2})$/);
       if (m) {
         params.push(Number(m[1]), Number(m[2]));
