@@ -1890,7 +1890,7 @@ app.get("/orders/history", auth(["admin"]), async (req, res) => {
 
     if (week_start) {
       params.push(week_start);
-      conditions.push(`(o.created_at AT TIME ZONE 'America/Mexico_City')::date >= $${params.length}::date AND (o.created_at AT TIME ZONE 'America/Mexico_City')::date < $${params.length}::date + 7`);
+      conditions.push(`(o.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Mexico_City')::date >= $${params.length}::date AND (o.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Mexico_City')::date < $${params.length}::date + 7`);
     } else if (week) {
       const m = String(week).match(/^(\d{4})-W(\d{1,2})$/);
       if (m) {
@@ -1954,7 +1954,7 @@ app.get("/ventas/resumen", auth(["admin"]), async (req, res) => {
 
     if (week_start) {
       params.push(week_start);
-      conditions.push(`(o.paid_at AT TIME ZONE 'America/Mexico_City')::date >= $${params.length}::date AND (o.paid_at AT TIME ZONE 'America/Mexico_City')::date < $${params.length}::date + 7`);
+      conditions.push(`(o.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Mexico_City')::date >= $${params.length}::date AND (o.paid_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Mexico_City')::date < $${params.length}::date + 7`);
     } else if (week) {
       const m = String(week).match(/^(\d{4})-W(\d{1,2})$/);
       if (m) {
@@ -2320,7 +2320,7 @@ app.get("/gastos", auth(["admin", "cajero"]), async (req, res) => {
     }
     if (week_start) {
       params.push(week_start);
-      conditions.push(`(g.created_at AT TIME ZONE 'America/Mexico_City')::date >= $${params.length}::date AND (g.created_at AT TIME ZONE 'America/Mexico_City')::date < $${params.length}::date + 7`);
+      conditions.push(`(g.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Mexico_City')::date >= $${params.length}::date AND (g.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Mexico_City')::date < $${params.length}::date + 7`);
     } else if (week) {
       const m = String(week).match(/^(\d{4})-W(\d{1,2})$/);
       if (m) {
