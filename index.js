@@ -1143,7 +1143,7 @@ app.delete("/extras/:id", auth(["admin"]), async (req, res) => {
 
 // ─── Órdenes ─────────────────────────────────────────────────────────────────
 
-app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (req, res) => {
+app.post("/orders", auth(["admin", "mesero", "cajero"]), verificarSistemaAbierto, async (req, res) => {
   const client = await pool.connect();
 
   try {
@@ -1302,7 +1302,7 @@ app.post("/orders", auth(["admin", "mesero"]), verificarSistemaAbierto, async (r
 
 app.get(
   "/orders/pending",
-  auth(["admin", "barista", "mesero"]),
+  auth(["admin", "barista", "mesero", "cajero"]),
   async (req, res) => {
     try {
       const result = await pool.query(`
@@ -1544,7 +1544,7 @@ app.put("/orders/:id/pay", auth(["admin", "cajero"]), verificarSistemaAbierto, a
   }
 });
 
-app.put("/orders/:id", auth(["admin", "mesero", "barista"]), verificarSistemaAbierto, async (req, res) => {
+app.put("/orders/:id", auth(["admin", "mesero", "barista", "cajero"]), verificarSistemaAbierto, async (req, res) => {
   const client = await pool.connect();
 
   try {
