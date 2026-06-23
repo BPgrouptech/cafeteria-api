@@ -140,6 +140,17 @@ pool.query(`
 `).catch((e) => console.error("Error creando tabla gastos:", e.message));
 
 pool.query(`
+  CREATE TABLE IF NOT EXISTS contactos (
+    id SERIAL PRIMARY KEY,
+    nombre TEXT NOT NULL,
+    celular TEXT,
+    descripcion TEXT,
+    created_by INTEGER REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT NOW()
+  )
+`).catch((e) => console.error("Error creando tabla contactos:", e.message));
+
+pool.query(`
   CREATE TABLE IF NOT EXISTS credito_contactos (
     id SERIAL PRIMARY KEY,
     nombre TEXT NOT NULL,
@@ -2432,6 +2443,70 @@ app.delete("/gastos/:id", auth(["admin"]), async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error eliminando gasto" });
+  }
+});
+
+// ─── Contactos ────────────────────────────────────────────────────────────────
+app.get("/contactos", auth(["admin"]), async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM contactos ORDER BY nombre ASC");
+    res.json(result.rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Error obteniendo contactos" });
+  }
+});
+
+app.post("/contactos", auth(["admin"]), async (req, res) => {
+  try {
+    const { nombre, celular, descripcion } = req.body;
+    if (!nombre?.trim()) return res.status(400).json({ error: "El nombre es requerido" });
+    const result = await pool.query(
+      "INSERT INTO contactos (nombre, celular, descripcion, created_by) VALUES ($1, $2, $3, $4) RETURNING *",
+      [nombre.trim(), celular?.trim() || null, descripcion?.trim() || null, req.user.id]
+    );
+    logAction(req.user, "Contacto creado", nombre.trim());
+    res.json(result.rows[0]);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Error creando contacto" });
+  }
+});
+
+app.put("/contactos/:id", auth(["admin"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nombre, celular, descripcion } = req.body;
+    if (!nombre?.trim()) return res.status(400).json({ error: "El nombre es requerido" });
+    const result = await pool.query(
+      "UPDATE contactos SET nombre = $1, celular = $2, descripcion = $3 WHERE id = $4 RETURNING *",
+      [nombre.trim(), celular?.trim() || null, descripcion?.trim() || null, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: "Contacto no encontrado" });
+    logAction(req.user, "Contacto editado", nombre.trim());
+    res.json(result.rows[0]);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Error editando contacto" });
+  }
+});
+
+app.delete("/contactos/:id", auth(["admin"]), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { password } = req.body;
+    if (!password) return res.status(400).json({ error: "Contraseña requerida" });
+    const userResult = await pool.query("SELECT * FROM users WHERE id = $1", [req.user.id]);
+    const valid = await bcrypt.compare(password, userResult.rows[0].password_hash);
+    if (!valid) return res.status(401).json({ error: "Contraseña incorrecta" });
+    const info = await pool.query("SELECT nombre FROM contactos WHERE id = $1", [id]);
+    if (info.rows.length === 0) return res.status(404).json({ error: "Contacto no encontrado" });
+    await pool.query("DELETE FROM contactos WHERE id = $1", [id]);
+    logAction(req.user, "Contacto eliminado", info.rows[0].nombre);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Error eliminando contacto" });
   }
 });
 
