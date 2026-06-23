@@ -2523,11 +2523,14 @@ app.delete("/credito/contactos/:id", auth(["admin"]), async (req, res) => {
     if (!valid) return res.status(401).json({ error: "Contraseña incorrecta" });
     const activos = await pool.query("SELECT COUNT(*) FROM creditos WHERE contacto_id = $1 AND status = 'activo'", [id]);
     if (Number(activos.rows[0].count) > 0) {
-      return res.status(400).json({ error: "No puedes eliminar un contacto con créditos activos" });
+      return res.status(400).json({ error: "No puedes eliminar un contacto con créditos activos pendientes de cobro" });
     }
     const info = await pool.query("SELECT nombre FROM credito_contactos WHERE id = $1", [id]);
+    // Limpiar referencias antes de borrar (créditos históricos y órdenes)
+    await pool.query("DELETE FROM creditos WHERE contacto_id = $1", [id]);
+    await pool.query("UPDATE orders SET contacto_id = NULL WHERE contacto_id = $1", [id]);
     await pool.query("DELETE FROM credito_contactos WHERE id = $1", [id]);
-    logAction(req.user, `Contacto de crédito eliminado`, info.rows[0]?.nombre);
+    logAction(req.user, `Contacto eliminado`, info.rows[0]?.nombre);
     res.json({ ok: true });
   } catch (error) {
     console.error(error);
