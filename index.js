@@ -3028,6 +3028,23 @@ app.delete("/empleados/:id", auth(["admin"]), async (req, res) => {
 
 // ─── Reporte semanal ──────────────────────────────────────────────────────────
 
+app.get("/debug/ordenes", auth(["admin"]), async (req, res) => {
+  const { fecha } = req.query;
+  if (!fecha) return res.status(400).json({ error: "Falta fecha (YYYY-MM-DD)" });
+  try {
+    const r = await pool.query(`
+      SELECT id, status, total, payment_method,
+             created_at AT TIME ZONE 'America/Mexico_City' AS created_mx,
+             paid_at    AT TIME ZONE 'America/Mexico_City' AS paid_mx
+      FROM orders
+      WHERE DATE(created_at AT TIME ZONE 'America/Mexico_City') = $1
+         OR DATE(paid_at    AT TIME ZONE 'America/Mexico_City') = $1
+      ORDER BY created_at
+    `, [fecha]);
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/reportes/semana", auth(["admin"]), async (req, res) => {
   const { inicio, fin } = req.query;
   if (!inicio || !fin) return res.status(400).json({ error: "Se requiere inicio y fin" });
