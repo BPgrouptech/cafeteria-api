@@ -3035,7 +3035,7 @@ app.get("/reportes/semana", auth(["admin"]), async (req, res) => {
     const TZ = "America/Mexico_City";
 
     const ventasDiaRes = await pool.query(`
-      SELECT DATE(paid_at AT TIME ZONE $3) AS dia,
+      SELECT DATE(created_at AT TIME ZONE $3) AS dia,
              COUNT(*) AS num_ordenes,
              SUM(total) AS total,
              SUM(CASE WHEN payment_method='efectivo' THEN total ELSE 0 END) AS efectivo,
@@ -3043,7 +3043,7 @@ app.get("/reportes/semana", auth(["admin"]), async (req, res) => {
              SUM(CASE WHEN payment_method='credito'  THEN total ELSE 0 END) AS credito
       FROM orders
       WHERE status='pagado'
-        AND DATE(paid_at AT TIME ZONE $3) BETWEEN $1 AND $2
+        AND DATE(created_at AT TIME ZONE $3) BETWEEN $1 AND $2
       GROUP BY dia ORDER BY dia
     `, [inicio, fin, TZ]);
 
@@ -3053,7 +3053,7 @@ app.get("/reportes/semana", auth(["admin"]), async (req, res) => {
       FROM order_items oi
       JOIN orders o ON o.id = oi.order_id
       WHERE o.status='pagado'
-        AND DATE(o.paid_at AT TIME ZONE $3) BETWEEN $1 AND $2
+        AND DATE(o.created_at AT TIME ZONE $3) BETWEEN $1 AND $2
       GROUP BY oi.product_name ORDER BY cantidad DESC
     `, [inicio, fin, TZ]);
 
@@ -3096,11 +3096,11 @@ app.get("/reportes/semana", auth(["admin"]), async (req, res) => {
     `, [inicio, fin, TZ]);
 
     const porHoraRes = await pool.query(`
-      SELECT EXTRACT(HOUR FROM paid_at AT TIME ZONE $3)::int AS hora,
+      SELECT EXTRACT(HOUR FROM created_at AT TIME ZONE $3)::int AS hora,
              COUNT(*) AS ordenes, SUM(total) AS total
       FROM orders
       WHERE status='pagado'
-        AND DATE(paid_at AT TIME ZONE $3) BETWEEN $1 AND $2
+        AND DATE(created_at AT TIME ZONE $3) BETWEEN $1 AND $2
       GROUP BY hora ORDER BY hora
     `, [inicio, fin, TZ]);
 
@@ -3109,7 +3109,7 @@ app.get("/reportes/semana", auth(["admin"]), async (req, res) => {
       FROM orders o
       JOIN users u ON u.id = o.waiter_id
       WHERE o.status='pagado'
-        AND DATE(o.paid_at AT TIME ZONE $3) BETWEEN $1 AND $2
+        AND DATE(o.created_at AT TIME ZONE $3) BETWEEN $1 AND $2
       GROUP BY u.name ORDER BY total DESC
     `, [inicio, fin, TZ]);
 
