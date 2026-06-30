@@ -3034,11 +3034,11 @@ app.get("/debug/ordenes", auth(["admin"]), async (req, res) => {
   try {
     const r = await pool.query(`
       SELECT id, status, total, payment_method,
-             created_at AT TIME ZONE 'America/Mexico_City' AS created_mx,
-             paid_at    AT TIME ZONE 'America/Mexico_City' AS paid_mx
+             created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Mexico_City' AS created_mx,
+             paid_at    AT TIME ZONE 'UTC' AT TIME ZONE 'America/Mexico_City' AS paid_mx
       FROM orders
-      WHERE DATE(created_at AT TIME ZONE 'America/Mexico_City') = $1
-         OR DATE(paid_at    AT TIME ZONE 'America/Mexico_City') = $1
+      WHERE DATE(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Mexico_City') = $1
+         OR DATE(paid_at    AT TIME ZONE 'UTC' AT TIME ZONE 'America/Mexico_City') = $1
       ORDER BY created_at
     `, [fecha]);
     res.json(r.rows);
@@ -3052,7 +3052,7 @@ app.get("/reportes/semana", auth(["admin"]), async (req, res) => {
     const TZ = "America/Mexico_City";
 
     const ventasDiaRes = await pool.query(`
-      SELECT DATE(created_at AT TIME ZONE $3) AS dia,
+      SELECT DATE(created_at AT TIME ZONE 'UTC' AT TIME ZONE $3) AS dia,
              COUNT(*) AS num_ordenes,
              SUM(total) AS total,
              SUM(CASE WHEN payment_method='efectivo' THEN total ELSE 0 END) AS efectivo,
@@ -3060,7 +3060,7 @@ app.get("/reportes/semana", auth(["admin"]), async (req, res) => {
              SUM(CASE WHEN payment_method='credito'  THEN total ELSE 0 END) AS credito
       FROM orders
       WHERE status='pagado'
-        AND DATE(created_at AT TIME ZONE $3) BETWEEN $1 AND $2
+        AND DATE(created_at AT TIME ZONE 'UTC' AT TIME ZONE $3) BETWEEN $1 AND $2
       GROUP BY dia ORDER BY dia
     `, [inicio, fin, TZ]);
 
@@ -3070,15 +3070,15 @@ app.get("/reportes/semana", auth(["admin"]), async (req, res) => {
       FROM order_items oi
       JOIN orders o ON o.id = oi.order_id
       WHERE o.status='pagado'
-        AND DATE(o.created_at AT TIME ZONE $3) BETWEEN $1 AND $2
+        AND DATE(o.created_at AT TIME ZONE 'UTC' AT TIME ZONE $3) BETWEEN $1 AND $2
       GROUP BY oi.product_name ORDER BY cantidad DESC
     `, [inicio, fin, TZ]);
 
     const gastosRes = await pool.query(`
       SELECT nombre, descripcion, valor,
-             DATE(created_at AT TIME ZONE $3) AS fecha
+             DATE(created_at AT TIME ZONE 'UTC' AT TIME ZONE $3) AS fecha
       FROM gastos
-      WHERE DATE(created_at AT TIME ZONE $3) BETWEEN $1 AND $2
+      WHERE DATE(created_at AT TIME ZONE 'UTC' AT TIME ZONE $3) BETWEEN $1 AND $2
       ORDER BY created_at
     `, [inicio, fin, TZ]);
 
@@ -3098,26 +3098,26 @@ app.get("/reportes/semana", auth(["admin"]), async (req, res) => {
       SELECT
         COUNT(*) FILTER (WHERE status='activo') AS pendientes_count,
         COALESCE(SUM(monto) FILTER (WHERE status='activo'), 0) AS pendientes_monto,
-        COUNT(*) FILTER (WHERE status='pagado' AND DATE(paid_at AT TIME ZONE $3) BETWEEN $1 AND $2) AS cobrados_count,
-        COALESCE(SUM(amount_paid) FILTER (WHERE status='pagado' AND DATE(paid_at AT TIME ZONE $3) BETWEEN $1 AND $2), 0) AS cobrados_monto
+        COUNT(*) FILTER (WHERE status='pagado' AND DATE(paid_at AT TIME ZONE 'UTC' AT TIME ZONE $3) BETWEEN $1 AND $2) AS cobrados_count,
+        COALESCE(SUM(amount_paid) FILTER (WHERE status='pagado' AND DATE(paid_at AT TIME ZONE 'UTC' AT TIME ZONE $3) BETWEEN $1 AND $2), 0) AS cobrados_monto
       FROM creditos
     `, [inicio, fin, TZ]);
 
     const creditosCreadosRes = await pool.query(`
       SELECT cc.nombre AS cliente, c.monto, c.status,
-             DATE(c.created_at AT TIME ZONE $3) AS fecha
+             DATE(c.created_at AT TIME ZONE 'UTC' AT TIME ZONE $3) AS fecha
       FROM creditos c
       JOIN credito_contactos cc ON cc.id = c.contacto_id
-      WHERE DATE(c.created_at AT TIME ZONE $3) BETWEEN $1 AND $2
+      WHERE DATE(c.created_at AT TIME ZONE 'UTC' AT TIME ZONE $3) BETWEEN $1 AND $2
       ORDER BY c.created_at
     `, [inicio, fin, TZ]);
 
     const porHoraRes = await pool.query(`
-      SELECT EXTRACT(HOUR FROM created_at AT TIME ZONE $3)::int AS hora,
+      SELECT EXTRACT(HOUR FROM (created_at AT TIME ZONE 'UTC' AT TIME ZONE $3))::int AS hora,
              COUNT(*) AS ordenes, SUM(total) AS total
       FROM orders
       WHERE status='pagado'
-        AND DATE(created_at AT TIME ZONE $3) BETWEEN $1 AND $2
+        AND DATE(created_at AT TIME ZONE 'UTC' AT TIME ZONE $3) BETWEEN $1 AND $2
       GROUP BY hora ORDER BY hora
     `, [inicio, fin, TZ]);
 
@@ -3126,7 +3126,7 @@ app.get("/reportes/semana", auth(["admin"]), async (req, res) => {
       FROM orders o
       JOIN users u ON u.id = o.waiter_id
       WHERE o.status='pagado'
-        AND DATE(o.created_at AT TIME ZONE $3) BETWEEN $1 AND $2
+        AND DATE(o.created_at AT TIME ZONE 'UTC' AT TIME ZONE $3) BETWEEN $1 AND $2
       GROUP BY u.name ORDER BY total DESC
     `, [inicio, fin, TZ]);
 
