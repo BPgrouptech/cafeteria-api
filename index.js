@@ -3026,6 +3026,92 @@ app.delete("/empleados/:id", auth(["admin"]), async (req, res) => {
   }
 });
 
+// ─── Reporte semanal ──────────────────────────────────────────────────────────
+
+app.get("/reportes/semana", auth(["admin"]), async (req, res) => {
+  const { inicio, fin } = req.query;
+  if (!inicio || !fin) return res.status(400).json({ error: "Se requiere inicio y fin" });
+  try {
+    const TZ = "America/Mexico_City";
+
+    const ventasDiaRes = await pool.query(`
+      SELECT DATE(paid_at AT TIME ZONE $3) AS dia,
+             COUNT(*) AS num_ordenes,
+             SUM(total) AS total,
+             SUM(CASE WHEN payment_method='efectivo' THEN total ELSE 0 END) AS efectivo,
+             SUM(CASE WHEN payment_method='tarjeta'  THEN total ELSE 0 END) AS tarjeta
+      FROM orders
+      WHERE status='pagado'
+        AND DATE(paid_at AT TIME ZONE $3) BETWEEN $1 AND $2
+      GROUP BY dia ORDER BY dia
+    `, [inicio, fin, TZ]);
+
+    const productosRes = await pool.query(`
+      SELECT oi.product_name, SUM(oi.quantity) AS cantidad,
+             SUM(oi.quantity * oi.unit_price) AS total
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      WHERE o.status='pagado'
+        AND DATE(o.paid_at AT TIME ZONE $3) BETWEEN $1 AND $2
+      GROUP BY oi.product_name ORDER BY cantidad DESC
+    `, [inicio, fin, TZ]);
+
+    const gastosRes = await pool.query(`
+      SELECT nombre, descripcion, valor,
+             DATE(created_at AT TIME ZONE $3) AS fecha
+      FROM gastos
+      WHERE DATE(created_at AT TIME ZONE $3) BETWEEN $1 AND $2
+      ORDER BY created_at
+    `, [inicio, fin, TZ]);
+
+    const nominasRes = await pool.query(`
+      SELECT n.id, n.fecha, n.total, n.notas,
+        COALESCE(json_agg(json_build_object(
+          'nombre', ne.nombre_snapshot, 'dias', ne.dias,
+          'extra_desc', ne.extra_desc, 'extra_monto', ne.extra_monto, 'total', ne.total
+        ) ORDER BY ne.nombre_snapshot) FILTER (WHERE ne.id IS NOT NULL), '[]') AS empleados
+      FROM nominas n
+      LEFT JOIN nomina_empleados ne ON ne.nomina_id = n.id
+      WHERE n.fecha BETWEEN $1 AND $2
+      GROUP BY n.id ORDER BY n.fecha
+    `, [inicio, fin]);
+
+    const creditosResRes = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE status='activo') AS pendientes_count,
+        COALESCE(SUM(monto) FILTER (WHERE status='activo'), 0) AS pendientes_monto,
+        COUNT(*) FILTER (WHERE status='pagado' AND DATE(paid_at AT TIME ZONE $3) BETWEEN $1 AND $2) AS cobrados_count,
+        COALESCE(SUM(amount_paid) FILTER (WHERE status='pagado' AND DATE(paid_at AT TIME ZONE $3) BETWEEN $1 AND $2), 0) AS cobrados_monto
+      FROM creditos
+    `, [inicio, fin, TZ]);
+
+    const creditosCreadosRes = await pool.query(`
+      SELECT cc.nombre AS cliente, c.monto, c.status,
+             DATE(c.created_at AT TIME ZONE $3) AS fecha
+      FROM creditos c
+      JOIN credito_contactos cc ON cc.id = c.contacto_id
+      WHERE DATE(c.created_at AT TIME ZONE $3) BETWEEN $1 AND $2
+      ORDER BY c.created_at
+    `, [inicio, fin, TZ]);
+
+    const totalVentas = ventasDiaRes.rows.reduce((s, r) => s + parseFloat(r.total || 0), 0);
+    const totalGastos = gastosRes.rows.reduce((s, r) => s + parseFloat(r.valor || 0), 0);
+    const totalNomina = nominasRes.rows.reduce((s, r) => s + parseFloat(r.total || 0), 0);
+
+    res.json({
+      inicio, fin,
+      ventas:   { por_dia: ventasDiaRes.rows, productos: productosRes.rows, total: totalVentas },
+      gastos:   { lista: gastosRes.rows, total: totalGastos },
+      nominas:  nominasRes.rows,
+      creditos: { resumen: creditosResRes.rows[0], creados: creditosCreadosRes.rows },
+      saldo_neto: totalVentas - totalGastos - totalNomina,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error generando reporte" });
+  }
+});
+
 app.get("/empleados/:id/historial", auth(["admin"]), async (req, res) => {
   try {
     const result = await pool.query(
