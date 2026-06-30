@@ -3039,7 +3039,8 @@ app.get("/reportes/semana", auth(["admin"]), async (req, res) => {
              COUNT(*) AS num_ordenes,
              SUM(total) AS total,
              SUM(CASE WHEN payment_method='efectivo' THEN total ELSE 0 END) AS efectivo,
-             SUM(CASE WHEN payment_method='tarjeta'  THEN total ELSE 0 END) AS tarjeta
+             SUM(CASE WHEN payment_method='tarjeta'  THEN total ELSE 0 END) AS tarjeta,
+             SUM(CASE WHEN payment_method='credito'  THEN total ELSE 0 END) AS credito
       FROM orders
       WHERE status='pagado'
         AND DATE(paid_at AT TIME ZONE $3) BETWEEN $1 AND $2
