@@ -3026,6 +3026,24 @@ app.delete("/empleados/:id", auth(["admin"]), async (req, res) => {
   }
 });
 
+app.get("/empleados/:id/historial", auth(["admin"]), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT ne.dias, ne.extra_desc, ne.extra_monto, ne.total,
+              n.fecha, n.id AS nomina_id
+       FROM nomina_empleados ne
+       JOIN nominas n ON n.id = ne.nomina_id
+       WHERE ne.empleado_id = $1
+       ORDER BY n.fecha DESC`,
+      [req.params.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error obteniendo historial" });
+  }
+});
+
 // ─── Nóminas ──────────────────────────────────────────────────────────────────
 
 app.get("/nominas", auth(["admin"]), async (req, res) => {
