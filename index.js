@@ -151,6 +151,46 @@ pool.query(`
 `).catch((e) => console.error("Error creando tabla contactos:", e.message));
 
 pool.query(`
+  CREATE TABLE IF NOT EXISTS empleados (
+    id              SERIAL PRIMARY KEY,
+    nombre          TEXT NOT NULL,
+    funcion         TEXT,
+    celular         TEXT,
+    salario_diario  NUMERIC(10,2) DEFAULT 0,
+    foto_key        TEXT,
+    archivo_key     TEXT,
+    archivo_nombre  TEXT,
+    created_by      INTEGER REFERENCES users(id),
+    created_at      TIMESTAMP DEFAULT NOW()
+  )
+`).catch((e) => console.error("Error creando tabla empleados:", e.message));
+
+pool.query(`
+  CREATE TABLE IF NOT EXISTS nominas (
+    id         SERIAL PRIMARY KEY,
+    fecha      DATE NOT NULL,
+    notas      TEXT,
+    total      NUMERIC(10,2) DEFAULT 0,
+    created_by INTEGER REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT NOW()
+  )
+`).catch((e) => console.error("Error creando tabla nominas:", e.message));
+
+pool.query(`
+  CREATE TABLE IF NOT EXISTS nomina_empleados (
+    id                      SERIAL PRIMARY KEY,
+    nomina_id               INTEGER NOT NULL REFERENCES nominas(id) ON DELETE CASCADE,
+    empleado_id             INTEGER REFERENCES empleados(id),
+    nombre_snapshot         TEXT NOT NULL,
+    salario_diario_snapshot NUMERIC(10,2) DEFAULT 0,
+    dias                    JSONB DEFAULT '[]',
+    extra_desc              TEXT,
+    extra_monto             NUMERIC(10,2) DEFAULT 0,
+    total                   NUMERIC(10,2) DEFAULT 0
+  )
+`).catch((e) => console.error("Error creando tabla nomina_empleados:", e.message));
+
+pool.query(`
   CREATE TABLE IF NOT EXISTS credito_contactos (
     id SERIAL PRIMARY KEY,
     nombre TEXT NOT NULL,
@@ -2868,6 +2908,233 @@ app.get("/orders/:id/ticket", async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).send("Error generando ticket");
+  }
+});
+
+// ─── Empleados ────────────────────────────────────────────────────────────────
+
+async function uploadFileToR2(file, folder = "files") {
+  const ext = path.extname(file.originalname || "").toLowerCase() || ".bin";
+  const key = `${folder}/${Date.now()}_${crypto.randomUUID()}${ext}`;
+  await s3.send(new PutObjectCommand({
+    Bucket: R2_BUCKET_NAME,
+    Key: key,
+    Body: file.buffer,
+    ContentType: file.mimetype,
+  }));
+  return key;
+}
+
+async function getFileUrl(key) {
+  if (!key) return null;
+  return getSignedUrl(s3, new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key }), { expiresIn: 600 });
+}
+
+app.get("/empleados", auth(["admin"]), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT e.*, u.name AS created_by_name
+       FROM empleados e
+       LEFT JOIN users u ON u.id = e.created_by
+       ORDER BY e.nombre ASC`
+    );
+    const empleados = await Promise.all(result.rows.map(async (e) => ({
+      ...e,
+      foto_url:    await getFileUrl(e.foto_key),
+      archivo_url: await getFileUrl(e.archivo_key),
+    })));
+    res.json(empleados);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error obteniendo empleados" });
+  }
+});
+
+app.post("/empleados", auth(["admin"]), upload.fields([{ name: "foto" }, { name: "archivo" }]), async (req, res) => {
+  try {
+    const { nombre, funcion, celular, salario_diario } = req.body;
+    if (!nombre?.trim()) return res.status(400).json({ error: "El nombre es requerido" });
+
+    let fotoKey = null, archivoKey = null, archivoNombre = null;
+    if (req.files?.foto?.[0])    fotoKey    = await uploadFileToR2(req.files.foto[0], "empleados/fotos");
+    if (req.files?.archivo?.[0]) {
+      archivoKey    = await uploadFileToR2(req.files.archivo[0], "empleados/archivos");
+      archivoNombre = req.files.archivo[0].originalname;
+    }
+
+    const result = await pool.query(
+      `INSERT INTO empleados (nombre, funcion, celular, salario_diario, foto_key, archivo_key, archivo_nombre, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [nombre.trim(), funcion?.trim() || null, celular?.trim() || null,
+       parseFloat(salario_diario) || 0, fotoKey, archivoKey, archivoNombre, req.user.id]
+    );
+    logAction(req.user, `Empleado creado: ${nombre.trim()}`);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error creando empleado" });
+  }
+});
+
+app.put("/empleados/:id", auth(["admin"]), upload.fields([{ name: "foto" }, { name: "archivo" }]), async (req, res) => {
+  try {
+    const { nombre, funcion, celular, salario_diario } = req.body;
+    const cur = await pool.query("SELECT * FROM empleados WHERE id=$1", [req.params.id]);
+    if (!cur.rows.length) return res.status(404).json({ error: "No encontrado" });
+    const c = cur.rows[0];
+
+    let fotoKey    = c.foto_key;
+    let archivoKey = c.archivo_key;
+    let archivoNombre = c.archivo_nombre;
+    if (req.files?.foto?.[0])    fotoKey    = await uploadFileToR2(req.files.foto[0], "empleados/fotos");
+    if (req.files?.archivo?.[0]) {
+      archivoKey    = await uploadFileToR2(req.files.archivo[0], "empleados/archivos");
+      archivoNombre = req.files.archivo[0].originalname;
+    }
+
+    const result = await pool.query(
+      `UPDATE empleados SET nombre=$1, funcion=$2, celular=$3, salario_diario=$4,
+         foto_key=$5, archivo_key=$6, archivo_nombre=$7
+       WHERE id=$8 RETURNING *`,
+      [nombre?.trim() || c.nombre, funcion?.trim() || null, celular?.trim() || null,
+       parseFloat(salario_diario) || 0, fotoKey, archivoKey, archivoNombre, req.params.id]
+    );
+    logAction(req.user, `Empleado editado: ${result.rows[0].nombre}`);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error actualizando empleado" });
+  }
+});
+
+app.delete("/empleados/:id", auth(["admin"]), async (req, res) => {
+  try {
+    const { password } = req.body;
+    if (!password) return res.status(400).json({ error: "Contraseña requerida" });
+    const u = await pool.query("SELECT password_hash FROM users WHERE id=$1", [req.user.id]);
+    if (!await bcrypt.compare(password, u.rows[0].password_hash))
+      return res.status(401).json({ error: "Contraseña incorrecta" });
+
+    const info = await pool.query("SELECT nombre FROM empleados WHERE id=$1", [req.params.id]);
+    if (!info.rows.length) return res.status(404).json({ error: "No encontrado" });
+    await pool.query("DELETE FROM empleados WHERE id=$1", [req.params.id]);
+    logAction(req.user, `Empleado eliminado: ${info.rows[0].nombre}`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error eliminando empleado" });
+  }
+});
+
+// ─── Nóminas ──────────────────────────────────────────────────────────────────
+
+app.get("/nominas", auth(["admin"]), async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT n.*, u.name AS created_by_name,
+        COALESCE(json_agg(
+          json_build_object(
+            'id', ne.id, 'empleado_id', ne.empleado_id,
+            'nombre_snapshot', ne.nombre_snapshot,
+            'salario_diario_snapshot', ne.salario_diario_snapshot,
+            'dias', ne.dias, 'extra_desc', ne.extra_desc,
+            'extra_monto', ne.extra_monto, 'total', ne.total
+          ) ORDER BY ne.nombre_snapshot
+        ) FILTER (WHERE ne.id IS NOT NULL), '[]') AS empleados
+      FROM nominas n
+      LEFT JOIN users u ON u.id = n.created_by
+      LEFT JOIN nomina_empleados ne ON ne.nomina_id = n.id
+      GROUP BY n.id, u.name
+      ORDER BY n.fecha DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error obteniendo nóminas" });
+  }
+});
+
+app.post("/nominas", auth(["admin"]), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { fecha, notas, empleados } = req.body;
+    if (!fecha) return res.status(400).json({ error: "La fecha es requerida" });
+    if (!Array.isArray(empleados) || !empleados.length) return res.status(400).json({ error: "Sin empleados" });
+
+    await client.query("BEGIN");
+    const total = empleados.reduce((s, e) => s + (parseFloat(e.total) || 0), 0);
+    const nom = await client.query(
+      `INSERT INTO nominas (fecha, notas, total, created_by) VALUES ($1,$2,$3,$4) RETURNING *`,
+      [fecha, notas?.trim() || null, total, req.user.id]
+    );
+    for (const e of empleados) {
+      await client.query(
+        `INSERT INTO nomina_empleados (nomina_id, empleado_id, nombre_snapshot, salario_diario_snapshot, dias, extra_desc, extra_monto, total)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [nom.rows[0].id, e.empleado_id || null, e.nombre_snapshot,
+         parseFloat(e.salario_diario_snapshot) || 0, JSON.stringify(e.dias || []),
+         e.extra_desc?.trim() || null, parseFloat(e.extra_monto) || 0, parseFloat(e.total) || 0]
+      );
+    }
+    await client.query("COMMIT");
+    logAction(req.user, `Nómina guardada: ${fecha}`, `$${total.toFixed(2)}`);
+    res.json({ ...nom.rows[0], empleados });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    res.status(500).json({ error: "Error guardando nómina" });
+  } finally { client.release(); }
+});
+
+app.put("/nominas/:id", auth(["admin"]), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { password, notas, empleados } = req.body;
+    if (!password) return res.status(400).json({ error: "Contraseña requerida" });
+    const u = await pool.query("SELECT password_hash FROM users WHERE id=$1", [req.user.id]);
+    if (!await bcrypt.compare(password, u.rows[0].password_hash))
+      return res.status(401).json({ error: "Contraseña incorrecta" });
+    if (!Array.isArray(empleados) || !empleados.length) return res.status(400).json({ error: "Sin empleados" });
+
+    await client.query("BEGIN");
+    const total = empleados.reduce((s, e) => s + (parseFloat(e.total) || 0), 0);
+    await client.query(`UPDATE nominas SET notas=$1, total=$2 WHERE id=$3`, [notas?.trim() || null, total, req.params.id]);
+    await client.query(`DELETE FROM nomina_empleados WHERE nomina_id=$1`, [req.params.id]);
+    for (const e of empleados) {
+      await client.query(
+        `INSERT INTO nomina_empleados (nomina_id, empleado_id, nombre_snapshot, salario_diario_snapshot, dias, extra_desc, extra_monto, total)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [req.params.id, e.empleado_id || null, e.nombre_snapshot,
+         parseFloat(e.salario_diario_snapshot) || 0, JSON.stringify(e.dias || []),
+         e.extra_desc?.trim() || null, parseFloat(e.extra_monto) || 0, parseFloat(e.total) || 0]
+      );
+    }
+    await client.query("COMMIT");
+    logAction(req.user, `Nómina editada #${req.params.id}`, `$${total.toFixed(2)}`);
+    res.json({ ok: true });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    res.status(500).json({ error: "Error editando nómina" });
+  } finally { client.release(); }
+});
+
+app.delete("/nominas/:id", auth(["admin"]), async (req, res) => {
+  try {
+    const { password } = req.body;
+    if (!password) return res.status(400).json({ error: "Contraseña requerida" });
+    const u = await pool.query("SELECT password_hash FROM users WHERE id=$1", [req.user.id]);
+    if (!await bcrypt.compare(password, u.rows[0].password_hash))
+      return res.status(401).json({ error: "Contraseña incorrecta" });
+
+    const info = await pool.query("SELECT fecha FROM nominas WHERE id=$1", [req.params.id]);
+    if (!info.rows.length) return res.status(404).json({ error: "No encontrada" });
+    await pool.query("DELETE FROM nominas WHERE id=$1", [req.params.id]);
+    logAction(req.user, `Nómina eliminada: ${info.rows[0].fecha}`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error eliminando nómina" });
   }
 });
 
