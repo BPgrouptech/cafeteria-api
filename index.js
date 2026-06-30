@@ -3094,16 +3094,40 @@ app.get("/reportes/semana", auth(["admin"]), async (req, res) => {
       ORDER BY c.created_at
     `, [inicio, fin, TZ]);
 
+    const porHoraRes = await pool.query(`
+      SELECT EXTRACT(HOUR FROM paid_at AT TIME ZONE $3)::int AS hora,
+             COUNT(*) AS ordenes, SUM(total) AS total
+      FROM orders
+      WHERE status='pagado'
+        AND DATE(paid_at AT TIME ZONE $3) BETWEEN $1 AND $2
+      GROUP BY hora ORDER BY hora
+    `, [inicio, fin, TZ]);
+
+    const porMeseroRes = await pool.query(`
+      SELECT u.name AS mesero, COUNT(*) AS ordenes, SUM(o.total) AS total
+      FROM orders o
+      JOIN users u ON u.id = o.waiter_id
+      WHERE o.status='pagado'
+        AND DATE(o.paid_at AT TIME ZONE $3) BETWEEN $1 AND $2
+      GROUP BY u.name ORDER BY total DESC
+    `, [inicio, fin, TZ]);
+
     const totalVentas = ventasDiaRes.rows.reduce((s, r) => s + parseFloat(r.total || 0), 0);
     const totalGastos = gastosRes.rows.reduce((s, r) => s + parseFloat(r.valor || 0), 0);
     const totalNomina = nominasRes.rows.reduce((s, r) => s + parseFloat(r.total || 0), 0);
 
     res.json({
       inicio, fin,
-      ventas:   { por_dia: ventasDiaRes.rows, productos: productosRes.rows, total: totalVentas },
-      gastos:   { lista: gastosRes.rows, total: totalGastos },
-      nominas:  nominasRes.rows,
-      creditos: { resumen: creditosResRes.rows[0], creados: creditosCreadosRes.rows },
+      ventas: {
+        por_dia:    ventasDiaRes.rows,
+        por_hora:   porHoraRes.rows,
+        por_mesero: porMeseroRes.rows,
+        productos:  productosRes.rows,
+        total:      totalVentas,
+      },
+      gastos:     { lista: gastosRes.rows, total: totalGastos },
+      nominas:    nominasRes.rows,
+      creditos:   { resumen: creditosResRes.rows[0], creados: creditosCreadosRes.rows },
       saldo_neto: totalVentas - totalGastos - totalNomina,
     });
   } catch (err) {
